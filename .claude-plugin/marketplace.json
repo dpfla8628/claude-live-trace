@@ -1,0 +1,6 @@
+{
+  "name": "claude-live-trace",
+  "description": "Claude Code 작업 과정을 옆 패널에 한국어로 보여 주는 mod",
+  "owner": { "name": "dpfla8628" },
+  "plugins": [{ "name": "live-trace", "source": "./" }]
+}

@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" width="1060" height="660" viewBox="0 0 1060 660" role="img" aria-label="live-trace 패널: 작업 중 화면과 끝난 뒤 작업 설명 카드">
+  <style>
+    text { font-family: 'D2Coding', 'Cascadia Mono', Consolas, 'Malgun Gothic', 'Apple SD Gothic Neo', 'Noto Sans Mono CJK KR', monospace; font-size: 13.5px; fill: #e6edf3; white-space: pre; }
+    .dim { fill: #7d8590; }
+    .b { font-weight: 700; }
+    .ok { fill: #3fb950; }
+    .run { fill: #d29922; }
+    .sec { font-weight: 700; fill: #f0f6fc; }
+    .title { font-size: 12.5px; fill: #9198a1; }
+  </style>
+  <rect width="1060" height="660" rx="14" fill="#0d1117"/>
+
+  <!-- 왼쪽: 작업 중 -->
+  <g>
+    <rect x="20" y="20" width="500" height="620" rx="10" fill="#161b22" stroke="#30363d"/>
+    <path d="M30 20 h480 a10 10 0 0 1 10 10 v22 h-500 v-22 a10 10 0 0 1 10 -10 z" fill="#1c2128"/>
+    <circle cx="40" cy="36" r="5" fill="#f85149"/><circle cx="57" cy="36" r="5" fill="#d29922"/><circle cx="74" cy="36" r="5" fill="#3fb950"/>
+    <text x="270" y="40" text-anchor="middle" class="title">작업 과정 · 작업 중</text>
+
+    <text x="38" y="80"><tspan class="dim">지금</tspan><tspan class="b"> 소스 확인 중</tspan><tspan class="dim">  5초</tspan></text>
+    <text x="38" y="104" class="dim">진행</text>
+    <rect x="78" y="95" width="230" height="10" rx="5" fill="#30363d"/>
+    <rect x="78" y="95" width="87" height="10" rx="5" fill="#d29922"/>
+    <text x="320" y="104">2/4단계 38%</text>
+    <text x="38" y="128"><tspan class="run b">▸조사</tspan><tspan class="ok">  ✓근거</tspan><tspan class="dim">  ◦변경  ◦검증</tspan></text>
+
+    <text x="38" y="162" class="sec">흐름</text>
+    <text x="38" y="184"><tspan class="dim">+ </tspan><tspan class="ok">✓</tspan><tspan class="dim"> [1/4] 판단 기준을 먼저 잡습니다</tspan></text>
+    <text x="70" y="205" class="dim">지침 메모 1개, 스킬 문서 2개, 검색 1번</text>
+    <text x="38" y="229"><tspan class="dim">+ </tspan><tspan class="run">▸</tspan><tspan class="b"> [2/4] 네모가 된 이유를 변경 이력에서 찾습니다</tspan></text>
+    <text x="70" y="250">↳ 모서리 값을 바꾼 커밋이 두 개라 둘 다 엽니다</text>
+    <text x="70" y="271"><tspan class="run">⊷</tspan> 소스 확인 중 <tspan class="dim">5초</tspan></text>
+    <text x="70" y="292" class="dim">지금까지 변경 이력 3번, 소스 2개</text>
+    <text x="54" y="313" class="dim">◦ 남은 단계 2개</text>
+    <text x="38" y="334" class="dim">+ 를 누르면 단계 안의 세부 동작이 펼쳐집니다</text>
+
+    <text x="38" y="368" class="sec">백그라운드</text>
+    <text x="38" y="390"><tspan class="run">⊷</tspan> 전체 테스트 돌리기</text>
+    <text x="38" y="411"><tspan class="run">⊷</tspan> 탐색 도우미: 버튼을 쓰는 화면 찾기</text>
+    <text x="54" y="432" class="dim">↳ 「Button」 찾기</text>
+
+    <text x="38" y="466" class="sec">근거</text>
+    <text x="38" y="488">[커밋] a1b2c3d4 radius 토큰 통일 <tspan class="dim">[2/4]</tspan></text>
+    <text x="38" y="509">[지침] 디자인 우선순위 <tspan class="dim">[1/4]</tspan></text>
+    <text x="38" y="530">[스킬] 디자인-반영 <tspan class="dim">[1/4]</tspan></text>
+
+    <text x="38" y="624" class="dim">Opus 5.5 | 대화 용량 16% | 5시간 한도 23%</text>
+  </g>
+
+  <!-- 오른쪽: 끝난 뒤 -->
+  <g>
+    <rect x="540" y="20" width="500" height="620" rx="10" fill="#161b22" stroke="#30363d"/>
+    <path d="M550 20 h480 a10 10 0 0 1 10 10 v22 h-500 v-22 a10 10 0 0 1 10 -10 z" fill="#1c2128"/>
+    <circle cx="560" cy="36" r="5" fill="#f85149"/><circle cx="577" cy="36" r="5" fill="#d29922"/><circle cx="594" cy="36" r="5" fill="#3fb950"/>
+    <text x="790" y="40" text-anchor="middle" class="title">작업 과정 · 끝난 뒤</text>
+
+    <text x="558" y="80"><tspan class="sec">작업 설명</tspan><tspan class="dim">  끝남, 4분 12초</tspan></text>
+    <text x="558" y="106" class="sec">요청</text>
+    <text x="574" y="127">이 네모 버튼 이상해.</text>
+    <text x="558" y="151" class="sec">쓴 스킬</text>
+    <text x="574" y="172">디자인-반영</text>
+    <text x="558" y="196" class="sec">따른 지침</text>
+    <text x="574" y="217">디자인 우선순위</text>
+    <text x="574" y="238">점검 (디자인-반영 스킬)</text>
+    <text x="558" y="262" class="sec">판단 근거</text>
+    <text x="574" y="283">a1b2c3d4 radius 토큰 통일 — 버튼 모서리 4 → 0</text>
+    <text x="558" y="307" class="sec">확인한 것</text>
+    <text x="574" y="328">지침 메모 1개</text><text x="794" y="328">스킬 문서 2개</text>
+    <text x="574" y="349">변경 이력 3번</text><text x="794" y="349">소스 4개</text>
+    <text x="574" y="370">검색 2번</text><text x="794" y="370">1곳 고침</text>
+    <text x="558" y="394" class="sec">검증</text>
+    <text x="574" y="415"><tspan class="ok">✓</tspan> 타입 검사 통과</text>
+    <text x="574" y="436"><tspan class="ok">✓</tspan> 테스트 돌리기 통과</text>
+    <text x="558" y="460" class="ok">✓조사  ✓근거  ✓변경  ✓검증</text>
+    <text x="558" y="481" class="dim">/trace 설명 으로 글로 받기</text>
+
+    <text x="558" y="515" class="sec">흐름</text>
+    <text x="558" y="537"><tspan class="dim">+ </tspan><tspan class="ok">✓</tspan><tspan class="dim"> [1/4] 판단 기준을 먼저 잡습니다</tspan></text>
+    <text x="558" y="558"><tspan class="dim">+ </tspan><tspan class="ok">✓</tspan><tspan class="dim"> [2/4] 네모가 된 이유를 변경 이력에서 찾습니다</tspan></text>
+    <text x="558" y="579"><tspan class="dim">+ </tspan><tspan class="ok">✓</tspan><tspan class="dim"> [3/4] 모서리 값을 둥글게 고칩니다</tspan></text>
+    <text x="558" y="600"><tspan class="dim">+ </tspan><tspan class="ok">✓</tspan><tspan class="b"> [4/4] 타입 검사와 테스트로 확인합니다</tspan></text>
+
+    <text x="558" y="624" class="dim">Opus 5.5 | 대화 용량 21% | 5시간 한도 25%</text>
+  </g>
+</svg>
