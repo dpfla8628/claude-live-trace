@@ -1,9 +1,10 @@
 import { atom, read, update } from 'claude-code'
-import type { Register } from 'claude-code'
+import type { Register, StateDollar } from 'claude-code'
 
-import type { Bg, Call, CallStatus, Evidence, Group, Phase, Story, Sub, Turn, TurnStatus } from '../types'
+import type { Call, CallStatus, Evidence, Group, Phase, Story, Sub, Task, TurnStatus } from '../types'
 import {
   agentName,
+  base,
   citedCommits,
   clip,
   countActions,
@@ -19,24 +20,26 @@ import {
   sourceOf,
   storyText,
   targetOf,
+  upsertLog,
   ymd,
 } from './describe'
 
 const PANE = 'live-trace'
 const TITLE = '작업 과정'
 // shape 태그: 필드가 바뀌면 올린다(리로드 뒤 남은 예전 값을 버리게)
-const calls = atom({ plugin: 'live-trace', key: 'calls' } as const, [], { shape: 'calls-3' })
-const subs = atom({ plugin: 'live-trace', key: 'subs' } as const, [], { shape: 'subs-1' })
-const turn = atom(
-  { plugin: 'live-trace', key: 'turn' } as const,
-  { text: '', status: 'idle', startedAt: 0 },
-  { shape: 'turn-1' },
-)
-const groups = atom({ plugin: 'live-trace', key: 'groups' } as const, [], { shape: 'groups-1' })
-const evidence = atom({ plugin: 'live-trace', key: 'evidence' } as const, [], { shape: 'evidence-2' })
-const bg = atom({ plugin: 'live-trace', key: 'bg' } as const, [], { shape: 'bg-1' })
-const stories = atom({ plugin: 'live-trace', key: 'stories' } as const, [], { shape: 'stories-3' })
+const calls = atom({ plugin: 'live-trace', key: 'calls' } as const, [], { shape: 'calls-4' })
+const tasks = atom({ plugin: 'live-trace', key: 'tasks' } as const, [], { shape: 'tasks-1' })
+const focus = atom({ plugin: 'live-trace', key: 'focus' } as const, 0, { shape: 'focus-1' })
+const subs = atom({ plugin: 'live-trace', key: 'subs' } as const, [], { shape: 'subs-2' })
+const groups = atom({ plugin: 'live-trace', key: 'groups' } as const, [], { shape: 'groups-2' })
+const evidence = atom({ plugin: 'live-trace', key: 'evidence' } as const, [], { shape: 'evidence-3' })
+const bg = atom({ plugin: 'live-trace', key: 'bg' } as const, [], { shape: 'bg-2' })
+const stories = atom({ plugin: 'live-trace', key: 'stories' } as const, [], { shape: 'stories-4' })
 const opened = atom({ plugin: 'live-trace', key: 'opened' } as const, [], { shape: 'opened-1' })
+
+// 작업 폴더 이름(패널 제목 · 기록 머리). 다시 불러오면 session.start 가 다시 채운다
+let where = ''
+const titleOf = () => (where !== '' ? `${TITLE} (${where})` : TITLE)
 
 const RULE = `[live-trace] 옆 패널이 사용자에게 작업 과정을 보여 준다. 패널은 네가 화면에 쓰는 문장을 그대로 읽는다.
 - 도구를 부르기 전 문장은 「무엇을 · 왜」 한 줄 한국어로 쓴다. 예: 네모가 된 이유부터 찾으려고 버튼 변경 이력을 봅니다
@@ -70,6 +73,7 @@ const DONE_LABEL: Record<TurnStatus, string> = {
   error: '오류로 멈춤',
 }
 
+// 이어서 하는 턴: 입력 없이 시작했거나(빈 글) 시스템이 넣은 글(<task-notification> 등)
 const isContinuation = (text: string) => text.trim() === '' || text.trimStart().startsWith('<')
 
 const prettyModel = (id: string) => {
@@ -77,9 +81,26 @@ const prettyModel = (id: string) => {
   return m ? `${(m[1] ?? '').replace(/^./, c => c.toUpperCase())} ${m[2]}.${m[3]}` : id
 }
 
-/** 끝난 턴 → 작업 설명 */
+/** 작업 하나의 진행률: [n/m] 단계가 있으면 그 단계의 가운데, 없으면 지나온 단계(조사 → 검증)로 어림 */
+const progressOf = (t: Task, mine: readonly Call[], gs: readonly Group[]) => {
+  const running = t.status === 'running'
+  const step = [...gs].reverse().find(g => g.step)?.step
+  const seen = new Set(mine.map(c => c.phase))
+  const furthest = PHASES.map(([p]) => p).filter(p => seen.has(p)).at(-1)
+  const pct = !running
+    ? 100
+    : step
+      ? Math.round(((step.n - 0.5) / Math.max(1, step.m)) * 100)
+      : furthest
+        ? PHASE_PCT[furthest]
+        : 5
+  const text = !running ? '100%' : step ? `${step.n}/${step.m}단계 ${pct}%` : `약 ${pct}%`
+  return { pct, text, step, seen }
+}
+
+/** 끝난 작업 → 작업 설명 */
 const buildStory = (
-  t: Turn,
+  t: Task,
   mine: readonly Call[],
   gs: readonly Group[],
   ev: readonly Evidence[],
@@ -98,8 +119,11 @@ const buildStory = (
   ].slice(-5)
   const sources = countActions(mine.map(c => c.src))
   return {
+    task: t.id,
     at,
-    request: t.text,
+    ...(where !== '' ? { where } : {}),
+    request: t.request,
+    ...(t.asks !== undefined && t.asks.length > 0 ? { asks: t.asks } : {}),
     status: t.status,
     skills: of('skill'),
     guides: of('guide'),
@@ -115,15 +139,22 @@ const buildStory = (
   }
 }
 
+/** 지금 작업 번호(가장 최근 요청) */
+async function currentTask($: StateDollar): Promise<number> {
+  return (await read($, tasks)).at(-1)?.id ?? 0
+}
+
 export const register: Register = on => {
+
   on('session.start', async ($, e, next) => {
+    where = base(String(e.cwd ?? '')).replace(/^[/\\]+$/, '')
     await $.command.register({ name: 'trace', description: '작업 과정 패널 열기 · /trace 설명 = 마지막 작업 설명' })
     // 오른쪽 자리(전체 화면 모드)는 52칸, 입력창 위 자리는 14줄로 시작. 사람이 끌거나 키로 바꾼 크기가 우선.
-    void $.ui.open({ id: PANE, title: TITLE, columns: 52, rows: 14 })
+    void $.ui.open({ id: PANE, title: titleOf(), columns: 52, rows: 14 })
     // 작업 중엔 1초마다 다시 그려 경과 시간이 흐르게(쉬는 동안은 그리지 않음)
     $.clock.every(1000, () => {
-      void read($, turn).then(t => {
-        if (t.status === 'running') $.ui.invalidate('ui.render')
+      void read($, tasks).then(ts => {
+        if (ts.some(t => t.status === 'running')) $.ui.invalidate('ui.render')
       })
     })
 
@@ -136,7 +167,7 @@ export const register: Register = on => {
 
       return { text: last ? storyText(last) : '아직 끝난 작업이 없습니다.' }
     }
-    await $.ui.open({ id: PANE, title: TITLE, columns: 52, rows: 14 })
+    await $.ui.open({ id: PANE, title: titleOf(), columns: 52, rows: 14 })
 
     return { text: '작업 과정 패널을 열었습니다. 끝난 작업 설명은 /trace 설명' }
   })
@@ -147,23 +178,50 @@ export const register: Register = on => {
     return { sections: [...r.sections, { id: 'live-trace:narrate', text: RULE, scope: 'session' }] }
   }).catch(($, e, next) => next(e))
 
+  // 사용자 요청 = 새 작업. 이어서 하는 턴(백그라운드 알림 · 같은 글로 다시 도는 반복)은 지금 작업에 붙인다.
   on('turn.start', async ($, e, next) => {
     const now = await $.clock.now()
     if (e.agentId === undefined) {
-      await update($, turn, (t): Turn => ({
-        text: isContinuation(e.text) ? t.text : clip(e.text, 200),
-        status: 'running',
-        startedAt: now,
-      }))
-      await update($, groups, () => [])
-      await update($, evidence, () => [])
-      await update($, opened, () => [])
+      const last = (await read($, tasks)).at(-1)
+      const text = clip(e.text, 200)
+      if (last !== undefined && (isContinuation(e.text) || text === last.request)) {
+        await update($, tasks, list =>
+          list.map((t): Task => (t.id === last.id ? { ...t, status: 'running', turnAt: now } : t)),
+        )
+      } else {
+        const task: Task = {
+          id: (last?.id ?? 0) + 1,
+          request: isContinuation(e.text) ? '' : text,
+          status: 'running',
+          startedAt: now,
+          turnAt: now,
+        }
+        await update($, tasks, list => [...list, task].slice(-10))
+        await update($, focus, () => 0) // 새 작업이 오면 그 작업을 본다
+      }
     } else {
       await update($, subs, list => list.map(s => (s.id === e.agentId ? { ...s, status: 'running', ms: undefined } : s)))
     }
 
     return next(e)
   })
+
+  // 작업 중에 사용자가 친 글: 엔진이 지금 턴에 넣어 주면 새 작업이 아니라 지금 작업의 「추가 요청」.
+  // 기다리게 보낸 글(ctrl+x enter)은 제 턴을 따로 시작하므로 turn.start 에서 새 작업이 된다.
+  on('prompt.submit', async ($, e, next) => {
+    const r = await next(e)
+    const mine = e.origin.kind === 'composer' || e.origin.kind === 'bridge'
+    if (mine && e.turnId !== undefined && !e.wait && e.command === undefined && !('drop' in r)) {
+      const last = (await read($, tasks)).at(-1)
+      if (last !== undefined && last.status === 'running') {
+        await update($, tasks, list =>
+          list.map(t => (t.id === last.id ? { ...t, asks: [...(t.asks ?? []), clip(e.text, 200)].slice(-5) } : t)),
+        )
+      }
+    }
+
+    return r
+  }).catch(($, e, next) => next(e)) // 관찰 전용
 
   // 화면에 쓰는 문장 → 그 뒤 도구들의 묶음 제목. 생각 조각은 읽지 않는다. 조각은 손대지 않고 넘긴다.
   on('turn.step', async function* ($, e, next) {
@@ -179,26 +237,28 @@ export const register: Register = on => {
       const said = parseNarration(text)
       text = ''
       try {
+        const task = await currentTask($)
         let made: Group | undefined
         await update($, groups, list => {
-          const last = list.at(-1)
+          const last = [...list].reverse().find(g => g.task === task)
           if (said.title === '' && last !== undefined) {
-            return [...list.slice(0, -1), { ...last, tools: [...last.tools, c.id] }]
+            return list.map(g => (g === last ? { ...g, tools: [...g.tools, c.id] } : g))
           }
           made = {
-            n: list.length + 1,
+            n: (list.at(-1)?.n ?? 0) + 1,
+            task,
             title: said.title || '(설명 없이 시작)',
             tools: [c.id],
             ...(said.step ? { step: said.step } : {}),
           }
-          return [...list, made].slice(-40)
+          return [...list, made].slice(-120)
         })
         const g = made
         if (g !== undefined && said.guides.length > 0) {
           await update($, evidence, list =>
             mergeEvidence(
               list,
-              said.guides.map(t => ({ kind: 'guide', text: t, group: g.n, count: 1 })),
+              said.guides.map(t => ({ kind: 'guide', text: t, task, group: g.n, count: 1 })),
             ),
           )
         }
@@ -209,8 +269,9 @@ export const register: Register = on => {
   })
 
   on('skill.prompt', async ($, e, next) => {
-    const g = (await read($, groups)).at(-1)?.n ?? 0
-    await update($, evidence, list => mergeEvidence(list, [{ kind: 'skill', text: e.skill, group: g, count: 1 }]))
+    const task = await currentTask($)
+    const g = [...(await read($, groups))].reverse().find(x => x.task === task)?.n ?? 0
+    await update($, evidence, list => mergeEvidence(list, [{ kind: 'skill', text: e.skill, task, group: g, count: 1 }]))
 
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -224,12 +285,22 @@ export const register: Register = on => {
 
       return next(e)
     }
-    await update($, turn, t => ({ ...t, status: e.reason, ms: e.durationMs }))
-    const t = await read($, turn)
-    const mine = (await read($, calls)).filter(c => c.startedAt >= t.startedAt && c.agent === undefined)
+    const last = (await read($, tasks)).at(-1)
+    if (last === undefined) return next(e)
+    // 이어서 한 턴이면 걸린 시간을 더한다
+    const t: Task = { ...last, status: e.reason, ms: (last.ms ?? 0) + e.durationMs }
+    await update($, tasks, list => list.map(x => (x.id === t.id ? t : x)))
+    const mine = (await read($, calls)).filter(c => c.task === t.id && c.agent === undefined)
     if (mine.length > 0) {
-      const story = buildStory(t, mine, await read($, groups), await read($, evidence), now, e.answer)
-      await update($, stories, list => [...list, story].slice(-10))
+      const story = buildStory(
+        t,
+        mine,
+        (await read($, groups)).filter(g => g.task === t.id),
+        (await read($, evidence)).filter(x => x.task === t.id),
+        now,
+        e.answer,
+      )
+      await update($, stories, list => [...list.filter(s => s.task !== t.id), story].slice(-10))
       try {
         const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
         if (home !== undefined) {
@@ -240,7 +311,8 @@ export const register: Register = on => {
           } catch {
             old = `# 작업 기록 ${ymd(now)}\n`
           }
-          await $.fs.write(path, `${old.trimEnd()}\n\n${storyText(story)}\n`)
+          // 같은 작업은 한 절로: 이어서 한 턴이 끝나면 그 절을 새로 쓴다
+          await $.fs.write(path, upsertLog(old, String(t.startedAt), storyText(story)))
         }
       } catch {
         // 기록 파일을 못 써도 패널은 그대로
@@ -253,7 +325,14 @@ export const register: Register = on => {
   on('agent.spawn', async ($, e, next) => {
     const startedAt = await $.clock.now()
     const key = `${e.tool_use_id}:${startedAt}`
-    const sub: Sub = { key, type: e.subagentType, description: e.description, status: 'running', startedAt }
+    const sub: Sub = {
+      key,
+      task: await currentTask($),
+      type: e.subagentType,
+      description: e.description,
+      status: 'running',
+      startedAt,
+    }
     await update($, subs, list => [...list, sub].slice(-30))
     const spawned = await next(e)
     await update($, subs, list =>
@@ -265,16 +344,24 @@ export const register: Register = on => {
     return spawned
   }).catch(($, e, next) => next(e)) // 관찰 전용
 
-  // 턴이 멈출 때마다 엔진이 아는 백그라운드 목록으로 맞춘다
+  // 턴이 멈출 때마다 엔진이 아는 백그라운드 목록으로 맞춘다(어느 작업에서 띄웠는지는 이어받는다)
   on('classic.Stop', async ($, e, next) => {
-    const tasks = (e.background_tasks ?? []).filter(x => x.type !== 'subagent')
+    const running = (e.background_tasks ?? []).filter(x => x.type !== 'subagent')
     const crons = e.session_crons ?? []
+    const prev = await read($, bg)
+    const cur = await currentTask($)
+    const taskOf = (id: string, label: string) => prev.find(b => b.id === id || b.label === label)?.task ?? cur
+    const item = (id: string, label: string) => ({ id, label, task: taskOf(id, label) })
     await update($, bg, () => [
-      ...tasks.map(x => ({
-        id: x.id,
-        label: x.type === 'shell' ? labelOf('Bash', { command: x.command ?? '', description: x.description }) : clip(x.description || x.type),
-      })),
-      ...crons.map(c => ({ id: c.id, label: c.recurring ? '정기 작업 예약됨' : '다시 진행 예약됨' })),
+      ...running.map(x =>
+        item(
+          x.id,
+          x.type === 'shell'
+            ? labelOf('Bash', { command: x.command ?? '', description: x.description })
+            : clip(x.description || x.type),
+        ),
+      ),
+      ...crons.map(c => item(c.id, c.recurring ? '정기 작업 예약됨' : '다시 진행 예약됨')),
     ])
 
     return next(e)
@@ -284,23 +371,30 @@ export const register: Register = on => {
     const startedAt = await $.clock.now()
     const args = e as unknown as Record<string, unknown>
     const tool = String(e.tool)
+    // 도우미의 동작은 그 도우미를 띄운 작업에 붙는다
+    const sub = e.agentId !== undefined ? (await read($, subs)).find(s => s.id === e.agentId) : undefined
+    const task = sub?.task ?? (await currentTask($))
     const gs = await read($, groups)
     const group =
-      e.agentId === undefined ? ((gs.find(g => g.tools.includes(e.tool_use_id)) ?? gs.at(-1))?.n ?? 0) : 0
+      e.agentId === undefined
+        ? ((gs.find(g => g.tools.includes(e.tool_use_id)) ?? [...gs].reverse().find(g => g.task === task))?.n ?? 0)
+        : 0
+    const target = targetOf(tool, args)
     const call: Call = {
       id: e.tool_use_id,
       tool,
       label: labelOf(tool, args),
       src: sourceOf(tool, args),
-      ...(targetOf(tool, args) !== undefined ? { target: targetOf(tool, args) } : {}),
+      ...(target !== undefined ? { target } : {}),
       phase: phaseOf(tool, args),
       ...(/\.(md|txt)$/i.test(String(args.file_path ?? '')) ? { isDoc: true } : {}),
+      task,
       group,
       status: 'running',
       startedAt,
       ...(e.agentId !== undefined ? { agent: e.agentId } : {}),
     }
-    await update($, calls, list => [...list, call].slice(-300))
+    await update($, calls, list => [...list, call].slice(-500))
     const finish = async (status: CallStatus) => {
       const ms = (await $.clock.now()) - startedAt
       await update($, calls, list => list.map(c => (c.id === call.id ? { ...c, status, ms } : c)))
@@ -319,14 +413,14 @@ export const register: Register = on => {
             // 목차가 없으면 지침 이름 없이 개수만
           }
         }
-        const found = evidenceOf(tool, args, ran.text ?? '', group, memoIndex)
+        const found = evidenceOf(tool, args, ran.text ?? '', group, memoIndex).map(x => ({ ...x, task }))
         if (found.length > 0) await update($, evidence, list => mergeEvidence(list, found))
         const isBg = args.run_in_background === true && (tool === 'Bash' || tool === 'PowerShell')
         if (isBg || tool === 'Monitor') {
-          await update($, bg, list => [...list, { id: call.id, label: call.label }].slice(-10))
+          await update($, bg, list => [...list, { id: call.id, label: call.label, task }].slice(-10))
         }
         if (tool === 'ScheduleWakeup' && args.stop !== true) {
-          await update($, bg, list => [...list.filter(b => b.id !== 'wake'), { id: 'wake', label: call.label }])
+          await update($, bg, list => [...list.filter(b => b.id !== 'wake'), { id: 'wake', label: call.label, task }])
         }
         if (tool === 'ScheduleWakeup' && args.stop === true) {
           await update($, bg, list => list.filter(b => b.id !== 'wake'))
@@ -340,20 +434,21 @@ export const register: Register = on => {
     }
   }).catch(($, e, next) => next(e)) // 관찰 전용: 기록이 실패해도 도구 호출은 그대로
 
-
-  // 화면: 위(지금 · 진행 · 단계 줄) → 흐름(큰 단계가 위에서 아래로, + 로 펼침) → 백그라운드 → 근거 → 사용량
+  // 화면: 작업 목록(2개 이상일 때) → 고른 작업의 위(지금 · 진행 · 단계 줄 또는 작업 설명) → 흐름 → 백그라운드 → 근거 → 사용량
   // 글은 자르지 않고 줄을 바꾼다. 색은 상태(초록 성공 · 노랑 진행 · 빨강 실패)에만.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Progress, Button } = $.ui.resolve(e)
-    const t = await read($, turn)
+    const ts = await read($, tasks)
+    const picked = await read($, focus)
     const all = await read($, calls)
-    const gs = await read($, groups)
-    const ev = await read($, evidence)
+    const allGroups = await read($, groups)
+    const allEvidence = await read($, evidence)
     const agents = await read($, subs)
     const bgs = await read($, bg)
     const done = await read($, stories)
     const open = await read($, opened)
-    let now = t.startedAt
+    const t = ts.find(x => x.id === picked) ?? ts.at(-1)
+    let now = t?.turnAt ?? 0
     try {
       now = await $.clock.now()
     } catch {
@@ -381,6 +476,23 @@ export const register: Register = on => {
     } catch {
       // 사용량을 못 읽으면 그 줄만 뺀다
     }
+    const hudBox =
+      hud !== '' ? (
+        <Box marginTop={1}>
+          <Text dimColor wrap="wrap">
+            {hud}
+          </Text>
+        </Box>
+      ) : null
+
+    if (t === undefined) {
+      return (
+        <Box flexDirection="column" width={cols}>
+          <Text dimColor>아직 작업이 없습니다. 요청을 보내면 여기에 과정이 흐릅니다.</Text>
+          {hudBox}
+        </Box>
+      )
+    }
 
     // 이름표는 흐리게, 내용은 줄바꿈. 들여쓴 줄은 Box 여백으로(넘어간 줄도 같은 자리에서 시작)
     const Row = (label: string, value: string, opts: { bold?: boolean; color?: 'success' | 'error' } = {}) => (
@@ -395,24 +507,74 @@ export const register: Register = on => {
     const Section = (name: string) => <Text bold>{name}</Text>
     const Indent = (pad: number, child: JSX.Element) => <Box paddingLeft={pad}>{child}</Box>
 
-    const mine = all.filter(c => c.startedAt >= t.startedAt && c.agent === undefined)
+    const callsOf = (id: number) => all.filter(c => c.task === id && c.agent === undefined)
+    const groupsOf = (id: number) => allGroups.filter(g => g.task === id)
+    const multi = ts.length > 1
+    const activeAgents = agents.filter(s => s.status === 'running')
+    // 끝났지만 도우미 · 셸이 아직 뒤에서 도는 작업
+    const busy = new Set([...activeAgents.map(s => s.task), ...bgs.map(b => b.task)])
+
+    let used = 0
+
+    // 작업 목록: 요청마다 한 줄. 번호를 누르면 그 작업을 본다(가장 최근 작업을 누르면 다시 따라감)
+    const newestFirst = [...ts].reverse()
+    const listed = newestFirst.slice(0, 5)
+    const taskList = multi ? (
+      <Box flexDirection="column" marginBottom={1}>
+        <Text>
+          <Text bold>작업 {ts.length}개</Text>
+          <Text dimColor>{'  번호를 누르면 그 작업을 봅니다'}</Text>
+        </Text>
+        {listed.map(x => {
+          const sel = x.id === t.id
+          const running = x.status === 'running'
+          const behind = !running && busy.has(x.id)
+          const glyph = running ? '▸' : behind ? '⊷' : x.status === 'answer' ? '✓' : x.status === 'aborted' ? '⊘' : '✗'
+          const color = running || behind ? 'warning' : x.status === 'answer' ? 'success' : 'error'
+          const meta = running
+            ? `${progressOf(x, callsOf(x.id), groupsOf(x.id)).pct}%`
+            : behind
+              ? '뒤에서 계속'
+              : `${DONE_LABEL[x.status]}${x.ms !== undefined ? `, ${duration(x.ms)}` : ''}`
+          const request = firstSentence(x.request, 60) || '(이어서 한 작업)'
+          used += linesOf(`${x.id}번 ${glyph} ${request}  ${meta}`, cols)
+          return (
+            <Box flexDirection="row">
+              <Button
+                plain
+                dimColor={!sel}
+                key={`task-${x.id}`}
+                onPress={async () => {
+                  await update($, focus, () => (x.id === ts.at(-1)?.id ? 0 : x.id))
+                }}
+              >
+                {`${x.id}번`}
+              </Button>
+              <Box paddingLeft={1} flexShrink={1}>
+                <Text wrap="wrap" bold={sel} dimColor={!sel}>
+                  <Text color={color}>{glyph}</Text> {request}
+                  <Text dimColor>{`  ${meta}`}</Text>
+                </Text>
+              </Box>
+            </Box>
+          )
+        })}
+        {newestFirst.length > listed.length && (
+          <Text dimColor>{`      이전 작업 ${newestFirst.length - listed.length}개`}</Text>
+        )}
+      </Box>
+    ) : null
+    used += multi ? 2 + (newestFirst.length > listed.length ? 1 : 0) : 0
+
+    const mine = callsOf(t.id)
+    const gs = groupsOf(t.id)
+    const ev = allEvidence.filter(x => x.task === t.id)
     const isRunning = t.status === 'running'
-    const story = !isRunning ? done.at(-1) : undefined
-    const seen = new Set(mine.map(c => c.phase))
+    const story = !isRunning ? done.find(s => s.task === t.id) : undefined
+    const { pct, text: pctText, step, seen } = progressOf(t, mine, gs)
     const current = mine.at(-1)?.phase
     const runningCall = [...mine].reverse().find(c => c.status === 'running')
-    const step = [...gs].reverse().find(g => g.step)?.step
-    const furthest = PHASES.map(([p]) => p).filter(p => seen.has(p)).at(-1)
-    // 단계 표시가 있으면 지금 단계의 가운데로 잡는다(첫 단계에서 0% 로 멈춰 보이지 않게)
-    const pct = !isRunning
-      ? 100
-      : step
-        ? Math.round(((step.n - 0.5) / Math.max(1, step.m)) * 100)
-        : furthest
-          ? PHASE_PCT[furthest]
-          : 5
-    const pctText = !isRunning ? '100%' : step ? `${step.n}/${step.m}단계 ${pct}%` : `약 ${pct}%`
-    const lastTouch = Math.max(t.startedAt, ...mine.map(c => c.startedAt + (c.ms ?? 0)))
+    const lastTouch = Math.max(t.turnAt, ...mine.map(c => c.startedAt + (c.ms ?? 0)))
     const nowText = runningCall
       ? `${runningCall.label} 중  ${duration(now - runningCall.startedAt)}`
       : `다음 할 일 정리 중  ${duration(now - lastTouch)}`
@@ -431,13 +593,14 @@ export const register: Register = on => {
       </Text>
     )
 
-    let used = 0
     let head: JSX.Element
+    const asks = (t.asks ?? []).slice(-2)
     if (isRunning) {
-      used += rowLines('지금', nowText) + 3
+      used += rowLines('지금', nowText) + 3 + asks.reduce((n, a) => n + rowLines('추가 요청', a), 0)
       head = (
         <Box flexDirection="column">
           {Row('지금', nowText, { bold: true })}
+          {asks.map(a => Row('추가 요청', firstSentence(a)))}
           <Progress label="진행" value={pct} max={100} valueText={pctText} />
           {phaseRow}
         </Box>
@@ -447,7 +610,13 @@ export const register: Register = on => {
       const inner = cols - 2
       const lists: [string, string[]][] = (
         [
-          ['요청', [firstSentence(story.request) || '(이어서 한 작업)']],
+          [
+            '요청',
+            [
+              firstSentence(story.request) || '(이어서 한 작업)',
+              ...(story.asks ?? []).map(a => `작업 중 추가: ${firstSentence(a)}`),
+            ],
+          ],
           ['쓴 스킬', story.skills],
           ['따른 지침', story.guides],
           ['판단 근거', story.basis],
@@ -467,11 +636,19 @@ export const register: Register = on => {
         (story.sources.length > 0 ? 1 + Math.ceil(story.sources.length / 2) : 0) +
         1 +
         checks.length
-      const Items = (items: string[]) => Indent(2, <Box flexDirection="column">{items.map(x => <Text wrap="wrap">{x}</Text>)}</Box>)
+      const Items = (items: string[]) =>
+        Indent(
+          2,
+          <Box flexDirection="column">
+            {items.map(x => (
+              <Text wrap="wrap">{x}</Text>
+            ))}
+          </Box>,
+        )
       head = (
         <Box flexDirection="column">
           <Text>
-            <Text bold>작업 설명</Text>
+            <Text bold>{multi ? `${t.id}번 작업 설명` : '작업 설명'}</Text>
             <Text dimColor>
               {'  '}
               {DONE_LABEL[story.status]}
@@ -514,20 +691,17 @@ export const register: Register = on => {
       )
     } else {
       used += 1
-      head = <Text dimColor>아직 작업이 없습니다. 요청을 보내면 여기에 과정이 흐릅니다.</Text>
+      head = <Text dimColor>{`${multi ? `${t.id}번 ` : ''}작업은 도구 없이 바로 답했습니다.`}</Text>
     }
 
-    const activeAgents = agents.filter(s => s.status === 'running')
-    const lastOf = (id?: string) => (id === undefined ? undefined : all.filter(c => c.agent === id).at(-1))
     const bgRows = activeAgents.length > 0 || bgs.length > 0 ? 2 + activeAgents.length * 2 + bgs.length : 0
-    const hudRows = hud !== '' ? 2 : 0
-    used += bgRows + hudRows
+    used += bgRows + (hud !== '' ? 2 : 0)
 
     // 흐름: 큰 단계([n/m] 문장) 아래에 표시 없는 문장(세부 단계)을 묶는다.
     // 표시가 하나도 없는 작업에선 문장마다 큰 단계.
     const byGroup = (n: number) => mine.filter(c => c.group === n)
     const orphan = byGroup(0)
-    const shown: Group[] = [...(orphan.length > 0 ? [{ n: 0, title: '(설명 없이 시작)', tools: [] }] : []), ...gs]
+    const shown: Group[] = [...(orphan.length > 0 ? [{ n: 0, task: t.id, title: '(설명 없이 시작)', tools: [] }] : []), ...gs]
     type Major = { lead: Group; subs: Group[]; label: string }
     const majors: Major[] = []
     let marked = false
@@ -652,6 +826,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column" width={cols}>
+        {taskList}
         {head}
         {shown.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
@@ -665,17 +840,27 @@ export const register: Register = on => {
         {bgRows > 0 && (
           <Box flexDirection="column" marginTop={1}>
             {Section('백그라운드')}
-            {activeAgents.map(s => (
-              <Box flexDirection="column">
-                <Text wrap="wrap">
-                  <Text color="warning">⊷</Text> {agentName(s.type)}: {s.description}
-                </Text>
-                {lastOf(s.id) && Indent(2, <Text dimColor wrap="wrap">↳ {lastOf(s.id)?.label}</Text>)}
-              </Box>
-            ))}
+            {activeAgents.map(s => {
+              // 도우미마다 따로: 어느 작업에서 띄웠는지 · 동작 수 · 경과 시간 · 최근 동작
+              const acts = all.filter(c => c.agent !== undefined && c.agent === s.id)
+              const meta = [multi ? `${s.task}번 작업` : '', `동작 ${acts.length}번`, duration(now - s.startedAt)]
+                .filter(Boolean)
+                .join(', ')
+              const latest = acts.at(-1)
+              return (
+                <Box flexDirection="column">
+                  <Text wrap="wrap">
+                    <Text color="warning">⊷</Text> {agentName(s.type)}: {s.description}
+                    <Text dimColor>{`  ${meta}`}</Text>
+                  </Text>
+                  {latest && Indent(2, <Text dimColor wrap="wrap">↳ {latest.label}</Text>)}
+                </Box>
+              )
+            })}
             {bgs.map(b => (
               <Text wrap="wrap">
                 <Text color="warning">⊷</Text> {b.label}
+                {multi && <Text dimColor>{`  ${b.task}번 작업`}</Text>}
               </Text>
             ))}
           </Box>
@@ -691,13 +876,7 @@ export const register: Register = on => {
             ))}
           </Box>
         )}
-        {hud !== '' && (
-          <Box marginTop={1}>
-            <Text dimColor wrap="wrap">
-              {hud}
-            </Text>
-          </Box>
-        )}
+        {hudBox}
       </Box>
     )
   })

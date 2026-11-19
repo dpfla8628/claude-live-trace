@@ -1,7 +1,18 @@
 import type { On } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 
-import { citedCommits, countActions, evidenceOf, labelOf, linesOf, parseNarration, phaseOf, sourceOf, storyText } from './describe'
+import {
+  citedCommits,
+  countActions,
+  evidenceOf,
+  labelOf,
+  linesOf,
+  parseNarration,
+  phaseOf,
+  sourceOf,
+  storyText,
+  upsertLog,
+} from './describe'
 
 const PANE = {
   plugin: 'live-trace',
@@ -33,6 +44,10 @@ describe('한국어 동작 이름과 단계', () => {
       ['Bash', { command: 'git commit -m x', description: '' }, '커밋하기', 'change'],
       ['Bash', { command: 'ls -al', description: '폴더 안 파일 보기' }, '폴더 안 파일 보기', 'explore'],
       ['Skill', { skill: '디자인-반영' }, '「디자인-반영」 스킬 불러오기', 'guide'],
+      // 검색: 낱말은 보여 주고 정규식은 「코드에서 찾기」
+      ['Grep', { pattern: 'radius' }, '「radius」 찾기', 'explore'],
+      ['Grep', { pattern: 'export (default )?function' }, '코드에서 찾기', 'explore'],
+      ['Glob', { pattern: '**/Button*.tsx' }, '파일 찾기', 'explore'],
       ['mcp__figma__get_screenshot', { nodeId: '12:34' }, '피그마 화면 캡처', 'guide'],
       ['mcp__jira__jira_add_comment', { issue_key: 'ABC-1' }, '지라에 쓰기', 'change'],
       ['mcp__jira__confluence_get_page', { page_id: '1' }, '위키에서 확인', 'guide'],
@@ -108,7 +123,9 @@ describe('한국어 동작 이름과 단계', () => {
 
   test('작업 설명 글', async () => {
     const text = storyText({
+      task: 1,
       at: 0,
+      where: 'proj',
       request: '이 네모 버튼 이상해',
       status: 'answer',
       skills: ['디자인-반영'],
@@ -126,6 +143,18 @@ describe('한국어 동작 이름과 단계', () => {
     expect(text).toContain('- 확인한 것: 소스 12개, 검색 3번 (걸린 시간 2분 10초)')
     expect(text).toContain('  2. radius 를 원으로 고칩니다')
     expect(text).toContain('- 검증: 타입 검사 통과')
+    expect(text).toMatch(/^### \d\d:\d\d \[proj\] 이 네모 버튼 이상해/)
+  })
+
+  test('기록 파일: 같은 작업은 한 절을 새로 쓰고, 다른 작업은 끝에 붙인다', async () => {
+    const one = upsertLog('# 작업 기록\n', '100', '### 첫 작업 (중간)')
+    expect(one).toBe('# 작업 기록\n\n<!-- live-trace:100 -->\n### 첫 작업 (중간)\n')
+    const two = upsertLog(one, '200', '### 둘째 작업')
+    const again = upsertLog(two, '100', '### 첫 작업 (끝)')
+    expect(again).toContain('### 첫 작업 (끝)')
+    expect(again).not.toContain('(중간)')
+    expect(again.indexOf('첫 작업')).toBeLessThan(again.indexOf('둘째 작업'))
+    expect(again.split('<!-- live-trace:').length).toBe(3)
   })
 })
 
@@ -146,12 +175,12 @@ const engine = (on: On) => {
 }
 
 // 도구 조각 하나를 부르는 응답: 생각(무시돼야 함) → 앞 문장 → 도구
-const say = (text: string, id: string, name: string, index = 0) =>
+const say = (text: string, id: string, name: string, index = 0, turnId = 't1') =>
   async function* () {
     yield { kind: 'thinking', index: 0, text: '비밀 생각' } as const
     yield { kind: 'text', index: 1, text } as const
     yield { kind: 'tool', index: 2, id, name } as const
-    return { turnId: 't1', index, answer: text, toolUses: [], stopReason: 'tool_use' } as never
+    return { turnId, index, answer: text, toolUses: [], stopReason: 'tool_use' } as never
   }
 
 const drain = async (s: AsyncIterable<unknown>) => {
@@ -367,9 +396,112 @@ test('백그라운드 셸 · 도우미가 무엇을 하는지 보인다', async 
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /^⊷ 전체 테스트/ }))?.text).toBe('⊷ 전체 테스트 돌리기')
-  expect((await ui.find({ type: 'Text', text: /탐색 도우미/ }))?.text).toBe('⊷ 탐색 도우미: 버튼 코드 찾기')
+  // 도우미마다 따로: 동작 수 · 경과 시간
+  expect((await ui.find({ type: 'Text', text: /탐색 도우미/ }))?.text).toMatch(/^⊷ 탐색 도우미: 버튼 코드 찾기 {2}동작 1번, \d+초$/)
   expect((await ui.find({ type: 'Text', text: /↳ 「radius」/ }))?.text).toBe('↳ 「radius」 찾기')
   await ui.unmount()
+})
+
+test('요청마다 작업 하나: 새 요청이 와도 지난 작업은 목록에 남고, 번호를 눌러 오간다', async ($, on) => {
+  engine(on)
+  let reply = say('[1/2] 버튼 파일을 봅니다', 'u1', 'Read')
+  on('turn.step', async function* () {
+    return yield* reply()
+  })
+  on('tool.call', () => ({ result: {}, text: '' }))
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'a1' }))
+
+  await $.session.start({ cwd: 'C:\\work\\proj', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: '이 네모 버튼 이상해', turnId: 't1' })
+  await drain($.turn.step({ turnId: 't1', index: 0, model: 'opus', messageCount: 1 }))
+  await $.tool.call({ tool: 'Read', file_path: '/repo/Button.tsx', tool_use_id: 'u1' } as never)
+  // 1번 작업이 띄운 도우미는 2번 작업이 시작해도 1번 작업 것
+  await $.agent.spawn({ tool_use_id: 'u1x', subagentType: 'Explore', description: '버튼 쓰는 화면 찾기', prompt: 'x' } as never)
+  await $.turn.complete({ answer: '', durationMs: 60_000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+
+  reply = say('[1/3] 높이 값을 찾습니다', 'u2', 'Grep', 1, 't2')
+  await $.turn.start({ text: '버튼 높이도 맞춰줘', turnId: 't2' })
+  await drain($.turn.step({ turnId: 't2', index: 1, model: 'opus', messageCount: 2 }))
+  await $.tool.call({ tool: 'Grep', pattern: 'height', tool_use_id: 'u2' } as never)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect((await ui.find({ type: 'Text', text: /^작업 2개/ }))?.text).toBe('작업 2개  번호를 누르면 그 작업을 봅니다')
+    expect((await ui.find({ type: 'Text', text: /버튼 높이도/ }))?.text).toBe('▸ 버튼 높이도 맞춰줘  17%')
+    // 1번 작업은 끝났지만 도우미가 아직 돌아서 「뒤에서 계속」
+    expect((await ui.find({ type: 'Text', text: /네모 버튼/ }))?.text).toBe('⊷ 이 네모 버튼 이상해  뒤에서 계속')
+    expect((await ui.find({ text: /1\/3단계 17%/ })) !== undefined).toBe(true)
+    expect((await ui.find({ type: 'Text', text: /탐색 도우미/ }))?.text).toMatch(/^⊷ 탐색 도우미: 버튼 쓰는 화면 찾기 {2}1번 작업, 동작 0번, /)
+    // 1번을 누르면 1번의 작업 설명과 흐름
+    await ui.press({ key: 'task-1' })
+    expect((await ui.find({ type: 'Text', text: /작업 설명/ }))?.text).toBe('1번 작업 설명  끝남, 1분 0초')
+    expect((await ui.find({ type: 'Text', text: /\[1\/2\]/ }))?.text).toBe('✓ [1/2] 버튼 파일을 봅니다')
+    expect(await ui.find({ type: 'Text', text: /높이 값을 찾습니다/ })).toBe(undefined)
+    // 2번을 누르면 다시 지금 작업
+    await ui.press({ key: 'task-2' })
+    expect((await ui.find({ type: 'Text', text: /\[1\/3\]/ }))?.text).toBe('▸ [1/3] 높이 값을 찾습니다')
+    await ui.unmount()
+  }
+})
+
+test('이어서 하는 턴(백그라운드 알림 · 빈 글 · 같은 글 반복)은 새 작업이 아니라 진행률과 흐름을 이어 간다', async ($, on) => {
+  engine(on)
+  let reply = say('[2/3] 테스트를 뒤에서 돌립니다', 'u1', 'Bash')
+  on('turn.step', async function* () {
+    return yield* reply()
+  })
+  on('tool.call', () => ({ result: {}, text: '' }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: '/loop 테스트 돌려줘', turnId: 't1' })
+  await drain($.turn.step({ turnId: 't1', index: 0, model: 'opus', messageCount: 1 }))
+  await $.tool.call({ tool: 'Bash', command: 'npm test', description: '전체 테스트 돌리기', tool_use_id: 'u1' } as never)
+  await $.turn.complete({ answer: '', durationMs: 30_000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+
+  for (const text of ['<task-notification>끝남</task-notification>', '', '/loop 테스트 돌려줘']) {
+    await $.turn.start({ text, turnId: 't2' })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /^작업 \d개/ })).toBe(undefined)
+    expect((await ui.find({ text: /2\/3단계 50%/ })) !== undefined).toBe(true)
+    expect((await ui.find({ type: 'Text', text: /\[2\/3\]/ }))?.text).toBe('▸ [2/3] 테스트를 뒤에서 돌립니다')
+    await ui.unmount()
+    await $.turn.complete({ answer: '', durationMs: 10_000, isAborted: false, turnId: 't2', reason: 'answer' } as never)
+  }
+  // 걸린 시간은 턴들의 합: 30초 + 10초 x3
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /^작업 설명/ }))?.text).toBe('작업 설명  끝남, 1분 0초')
+  await ui.unmount()
+})
+
+test('작업 중에 친 요청은 지금 작업의 「추가 요청」으로 보이고, 끝난 카드의 요청 칸에도 남는다', async ($, on) => {
+  engine(on)
+  on('turn.step', async function* () {
+    return yield* say('[1/2] 버튼 파일을 찾습니다', 'u1', 'Glob')()
+  })
+  on('tool.call', () => ({ result: {}, text: '' }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: '버튼 모서리 값 알려줘', turnId: 't1' })
+  await drain($.turn.step({ turnId: 't1', index: 0, model: 'opus', messageCount: 1 }))
+  await $.tool.call({ tool: 'Glob', pattern: '**/Button*', tool_use_id: 'u1' } as never)
+  await $.prompt.submit({ text: '그 다음엔 높이 값도 알려줘. 고치지는 마.', turnId: 't1', wait: false, origin: { kind: 'composer' } } as never)
+  // 알림 · 기다리게 보낸 글은 추가 요청이 아님
+  await $.prompt.submit({ text: '<task-notification>x</task-notification>', turnId: 't1', wait: false, origin: { kind: 'task-notification' } } as never)
+  await $.prompt.submit({ text: '다음 작업', turnId: 't1', wait: true, origin: { kind: 'composer' } } as never)
+
+  const mid = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await mid.find({ type: 'Text', text: /^추가 요청/ }))?.text).toBe('추가 요청 그 다음엔 높이 값도 알려줘.')
+  expect(await mid.find({ type: 'Text', text: /^작업 \d개/ })).toBe(undefined)
+  expect(await mid.find({ text: /task-notification|다음 작업/ })).toBe(undefined)
+  await mid.unmount()
+
+  await $.turn.complete({ answer: '', durationMs: 5000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /^작업 중 추가/ }))?.text).toBe('작업 중 추가: 그 다음엔 높이 값도 알려줘.')
+  await ui.unmount()
+  const r = await $.command.run({ command: 'trace', args: '설명' } as never)
+  expect(r.text).toContain('- 작업 중 추가 요청: 그 다음엔 높이 값도 알려줘. 고치지는 마.')
 })
 
 test('아무 일도 없을 때 안내 문구', async $ => {

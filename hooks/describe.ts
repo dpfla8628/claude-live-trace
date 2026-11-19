@@ -138,10 +138,13 @@ export const labelOf = (tool: string, a: Args): string => {
       return `${named(path)} 새로 쓰기`
     case 'NotebookEdit':
       return `${named(path)} 고치기`
-    case 'Grep':
-      return `「${clip(str(a.pattern), 20)}」 찾기`
+    case 'Grep': {
+      // 정규식은 사람이 읽기 어려우니 낱말일 때만 보여 준다
+      const p = str(a.pattern)
+      return /^[\p{L}\p{N}_ .-]{1,30}$/u.test(p) ? `「${p}」 찾기` : '코드에서 찾기'
+    }
     case 'Glob':
-      return `파일 찾기 ${clip(str(a.pattern), 24)}`
+      return '파일 찾기'
     case 'Bash':
     case 'PowerShell':
       return shellLabel(str(a.command), str(a.description))
@@ -236,7 +239,8 @@ export const memoTitle = (index: string, path: string): string | undefined => {
 /** 도구 호출 하나에서 뽑는 근거. memoIndex = 읽은 메모가 있는 폴더의 MEMORY.md */
 export const evidenceOf = (tool: string, a: Args, text: string, group: number, memoIndex = ''): Evidence[] => {
   const out: Evidence[] = []
-  const add = (kind: Evidence['kind'], t: string) => out.push({ kind, text: t, group, count: 1 })
+  // 작업 번호는 부르는 쪽이 채운다
+  const add = (kind: Evidence['kind'], t: string) => out.push({ kind, text: t, task: 0, group, count: 1 })
   const path = str(a.file_path)
   if (tool === 'Read' && path !== '') {
     const kind = docKind(path)
@@ -286,12 +290,12 @@ export const evidenceOf = (tool: string, a: Args, text: string, group: number, m
 export const mergeEvidence = (list: readonly Evidence[], items: readonly Evidence[]): Evidence[] => {
   const next = [...list]
   for (const it of items) {
-    const i = next.findIndex(x => x.kind === it.kind && x.text === it.text)
+    const i = next.findIndex(x => x.kind === it.kind && x.text === it.text && x.task === it.task)
     const old = next[i]
     if (old !== undefined) next[i] = { ...old, count: old.count + 1 }
     else next.push(it)
   }
-  return next.slice(-60)
+  return next.slice(-150)
 }
 
 const STEP = /\[(\d+)\/(\d+)\]/g
@@ -379,11 +383,22 @@ export const firstSentence = (s: string, n = 120): string => clip(s.replace(/([.
 export const duration = (ms: number): string =>
   ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))}초` : `${Math.floor(ms / 60_000)}분 ${Math.round((ms % 60_000) / 1000)}초`
 
+/** 날짜별 기록: 같은 작업(key)의 절이 있으면 바꾸고, 없으면 끝에 붙인다(이어서 한 턴이 절을 겹쳐 쓰지 않게) */
+export const upsertLog = (old: string, key: string, story: string): string => {
+  const mark = `<!-- live-trace:${key} -->`
+  const block = `${mark}\n${story}\n`
+  const i = old.indexOf(mark)
+  if (i < 0) return `${old.trimEnd()}\n\n${block}`
+  const end = old.indexOf('<!-- live-trace:', i + mark.length)
+  return `${old.slice(0, i)}${block}${end < 0 ? '' : `\n${old.slice(end)}`}`
+}
+
 /** /trace 설명 과 날짜별 기록에 쓰는 글 */
 export const storyText = (s: Story): string =>
   [
-    `### ${hhmm(s.at)} ${clip(s.request, 60) || '(이어서 한 작업)'}`,
+    `### ${hhmm(s.at)} ${s.where ? `[${s.where}] ` : ''}${clip(s.request, 60) || '(이어서 한 작업)'}`,
     `- 상황: ${s.request || '(이어서 한 작업)'}`,
+    ...(s.asks ?? []).map(a => `- 작업 중 추가 요청: ${a}`),
     `- 쓴 스킬: ${or(s.skills)}`,
     `- 따른 지침: ${or(s.guides)}`,
     `- 근거: ${or(s.basis)}`,
