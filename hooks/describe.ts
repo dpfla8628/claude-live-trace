@@ -1,5 +1,5 @@
 // 도구 호출을 사람이 읽는 한국어로 바꾸는 순수 함수들(엔진 호출 없음)
-import type { Evidence, Group, Phase, Story } from '../types'
+import type { Evidence, Group, HookAct, HookNote, Item, Phase, Story } from '../types'
 
 type Args = Record<string, unknown>
 
@@ -380,6 +380,55 @@ export const citedCommits = (commits: readonly string[], answer: string): string
 /** 요청의 첫 문장(카드에서 길게 늘어지지 않게) */
 export const firstSentence = (s: string, n = 120): string => clip(s.replace(/([.!?])\s[\s\S]*$/, '$1'), n)
 
+/** 근거 한 줄: 커밋은 해시를 떼고 「변경 기록 「제목」」, 나머지는 그대로 */
+export const itemText = (i: Pick<Item, 'kind' | 'text'>): string =>
+  i.kind === 'commit' ? `변경 기록 「${i.text.replace(/^[0-9a-f]{7,40}\s+/, '')}」` : i.text
+/** 기록 파일용: 해시까지 남기고 이유를 괄호로 */
+const logItem = (i: Item): string => `${i.text}${i.why !== undefined ? ` (왜: ${i.why})` : ''}`
+
+/** 훅이 준 글의 첫 줄: 머리표 · 태그 줄은 건너뛰고, 「(cpu=39% …)」 같은 상태 숫자 괄호는 뗀다 */
+export const hookLine = (s: string): string => {
+  const line =
+    s
+      .split('\n')
+      .map(l => l.replace(/^[#>*\-\s]+/, '').replace(/\*\*/g, '').trim())
+      .find(l => l !== '' && !/^<\/?[\w-]+>$/.test(l)) ?? ''
+  return firstSentence(line.replace(/\s*\([^()]*=[^()]*\)/g, ''), 100)
+}
+
+const HOOK_VERB: Record<HookAct, string> = {
+  block: '막음',
+  ask: '확인을 물음',
+  edit: '고침',
+  note: '지시를 덧붙임',
+  load: '규칙 문서를 불러옴',
+}
+
+const MEMORY_TYPE: Record<string, string> = { User: '사용자 전체', Project: '프로젝트', Local: '이 PC 전용', Managed: '조직' }
+const LOAD_REASON: Record<string, string> = {
+  session_start: '세션 시작',
+  nested_traversal: '하위 폴더 진입',
+  path_glob_match: '경로 규칙 일치',
+  include: '다른 규칙이 포함',
+  compact: '대화 압축 뒤',
+}
+/** 불러온 규칙 문서: 「CLAUDE.md (프로젝트 · 세션 시작)」 */
+export const loadedText = (path: string, type: string, reason: string): string =>
+  `${base(path)} (${[MEMORY_TYPE[type] ?? type, LOAD_REASON[reason] ?? reason].join(' · ')})`
+/** 「요청 때 지시를 덧붙임: 존댓말로 답할 것」 · 「막음: resource-guard: … (2번)」 */
+export const hookLabel = (h: Pick<HookNote, 'act' | 'text' | 'count'> & { at?: string }): string =>
+  `${h.at !== undefined ? `${h.at} 때 ` : ''}${HOOK_VERB[h.act]}: ${h.text}${h.count > 1 ? ` (${h.count}번)` : ''}`
+
+/** 훅 결과(막음 · 덧붙인 지시) → 적을 일들 */
+export const hookNotes = (
+  r: { block?: string; additionalContext?: readonly string[] },
+  where: Pick<HookNote, 'task' | 'group'> & { at?: string },
+): Omit<HookNote, 'count'>[] =>
+  [
+    ...(r.block !== undefined ? [{ ...where, act: 'block' as const, text: hookLine(r.block) }] : []),
+    ...(r.additionalContext ?? []).map(c => ({ ...where, act: 'note' as const, text: hookLine(c) })),
+  ].filter(h => h.text !== '')
+
 export const duration = (ms: number): string =>
   ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))}초` : `${Math.floor(ms / 60_000)}분 ${Math.round((ms % 60_000) / 1000)}초`
 
@@ -399,9 +448,10 @@ export const storyText = (s: Story): string =>
     `### ${hhmm(s.at)} ${s.where ? `[${s.where}] ` : ''}${clip(s.request, 60) || '(이어서 한 작업)'}`,
     `- 상황: ${s.request || '(이어서 한 작업)'}`,
     ...(s.asks ?? []).map(a => `- 작업 중 추가 요청: ${a}`),
-    `- 쓴 스킬: ${or(s.skills)}`,
-    `- 따른 지침: ${or(s.guides)}`,
-    `- 근거: ${or(s.basis)}`,
+    `- 쓴 스킬: ${or(s.skills.map(logItem))}`,
+    `- 따른 지침: ${or(s.guides.map(logItem))}`,
+    ...(s.hooks.length > 0 ? [`- 훅 · 규칙: ${s.hooks.map(hookLabel).join('; ')}`] : []),
+    `- 근거: ${or(s.basis.map(logItem))}`,
     `- 확인한 것: ${s.explored || '없음'}${s.ms !== undefined ? ` (걸린 시간 ${duration(s.ms)})` : ''}`,
     '- 한 일:',
     ...(s.steps.length === 0 ? ['  (기록 없음)'] : s.steps.map((t, i) => `  ${i + 1}. ${t}`)),

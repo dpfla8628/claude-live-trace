@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, StateDollar } from 'claude-code'
 
-import type { Call, CallStatus, Evidence, Group, Phase, Story, Sub, Task, TurnStatus } from '../types'
+import type { Call, CallStatus, Evidence, Group, HookAct, HookNote, Item, Phase, Story, Sub, Task, TurnStatus } from '../types'
 import {
   agentName,
   base,
@@ -12,7 +12,12 @@ import {
   evidenceOf,
   firstSentence,
   groupLabel,
+  hookLabel,
+  hookLine,
+  hookNotes,
+  itemText,
   labelOf,
+  loadedText,
   linesOf,
   mergeEvidence,
   parseNarration,
@@ -26,6 +31,7 @@ import {
 
 const PANE = 'live-trace'
 const TITLE = '작업 과정'
+const NO_TITLE = '(설명 없이 시작)'
 // shape 태그: 필드가 바뀌면 올린다(리로드 뒤 남은 예전 값을 버리게)
 const calls = atom({ plugin: 'live-trace', key: 'calls' } as const, [], { shape: 'calls-4' })
 const tasks = atom({ plugin: 'live-trace', key: 'tasks' } as const, [], { shape: 'tasks-1' })
@@ -34,8 +40,9 @@ const subs = atom({ plugin: 'live-trace', key: 'subs' } as const, [], { shape: '
 const groups = atom({ plugin: 'live-trace', key: 'groups' } as const, [], { shape: 'groups-2' })
 const evidence = atom({ plugin: 'live-trace', key: 'evidence' } as const, [], { shape: 'evidence-3' })
 const bg = atom({ plugin: 'live-trace', key: 'bg' } as const, [], { shape: 'bg-2' })
-const stories = atom({ plugin: 'live-trace', key: 'stories' } as const, [], { shape: 'stories-4' })
+const stories = atom({ plugin: 'live-trace', key: 'stories' } as const, [], { shape: 'stories-5' })
 const opened = atom({ plugin: 'live-trace', key: 'opened' } as const, [], { shape: 'opened-1' })
+const notes = atom({ plugin: 'live-trace', key: 'notes' } as const, [], { shape: 'notes-1' })
 
 // 작업 폴더 이름(패널 제목 · 기록 머리). 다시 불러오면 session.start 가 다시 채운다
 let where = ''
@@ -57,13 +64,16 @@ const PHASES: readonly [Phase, string][] = [
 const PHASE_PCT: Record<Phase, number> = { explore: 15, guide: 35, change: 60, verify: 85 }
 const ICON: Record<CallStatus, string> = { running: '⊷', ok: '✓', error: '✗', denied: '⊘' }
 const COLOR = { running: 'warning', ok: 'success', error: 'error', denied: 'error' } as const
-const TAG: Record<Evidence['kind'], string> = {
-  commit: '커밋',
-  external: '외부',
-  guide: '지침',
-  skill: '스킬',
-}
 const ORDER: readonly Evidence['kind'][] = ['commit', 'external', 'guide', 'skill']
+// 훅: 막음은 빨강, 묻기 · 고침은 노랑, 지시 덧붙임은 색 없이
+const HOOK_COLOR: Record<HookAct, 'error' | 'warning' | undefined> = {
+  block: 'error',
+  ask: 'warning',
+  edit: 'warning',
+  note: undefined,
+  load: undefined,
+}
+const HOOK_ORDER: readonly HookAct[] = ['block', 'ask', 'edit', 'note', 'load']
 const DONE_LABEL: Record<TurnStatus, string> = {
   idle: '대기',
   running: '작업 중',
@@ -98,16 +108,24 @@ const progressOf = (t: Task, mine: readonly Call[], gs: readonly Group[]) => {
   return { pct, text, step, seen }
 }
 
+/** 근거 + 그것을 찾은 단계에서 Claude 가 쓴 「무엇을 · 왜」 문장 */
+const withWhy = (x: Pick<Evidence, 'kind' | 'text' | 'group'>, gs: readonly Group[]): Item => {
+  const why = gs.find(g => g.n === x.group)?.title
+  return why !== undefined && why !== NO_TITLE ? { kind: x.kind, text: x.text, why } : { kind: x.kind, text: x.text }
+}
+
 /** 끝난 작업 → 작업 설명 */
 const buildStory = (
   t: Task,
   mine: readonly Call[],
   gs: readonly Group[],
   ev: readonly Evidence[],
+  hs: readonly HookNote[],
   at: number,
   answer: string,
 ): Story => {
-  const of = (k: Evidence['kind']) => ev.filter(x => x.kind === k).map(x => x.text)
+  const of = (k: Evidence['kind']) => ev.filter(x => x.kind === k).map(x => withWhy(x, gs))
+  const commits = of('commit')
   // 문서(.md 등) 수정은 검증할 대상이 아니므로 「바꾼 뒤 검증 안 함」에서 뺀다
   const kinds = mine.map(c => (c.phase === 'change' && c.isDoc === true ? 'doc' : c.phase))
   const lastChange = kinds.lastIndexOf('change')
@@ -127,9 +145,17 @@ const buildStory = (
     status: t.status,
     skills: of('skill'),
     guides: of('guide'),
+    // 막음 → 물음 → 고침 → 덧붙인 지시 → 불러온 규칙 순으로 6개까지
+    hooks: [...hs].sort((a, b) => HOOK_ORDER.indexOf(a.act) - HOOK_ORDER.indexOf(b.act)).slice(0, 6),
     // 파일 이름은 나열하지 않는다(많으면 길어짐) — 종류별 개수만
     // 커밋은 최종 답이 든 것(없으면 마지막에 찾은 3개), 외부 근거는 3개까지
-    basis: [...citedCommits(of('commit'), answer), ...of('external').slice(0, 3)],
+    basis: [
+      ...citedCommits(
+        commits.map(x => x.text),
+        answer,
+      ).flatMap(t => commits.filter(x => x.text === t).slice(0, 1)),
+      ...of('external').slice(0, 3),
+    ],
     sources,
     explored: sources.join(', '),
     ...(t.ms !== undefined ? { ms: t.ms } : {}),
@@ -142,6 +168,44 @@ const buildStory = (
 /** 지금 작업 번호(가장 최근 요청) */
 async function currentTask($: StateDollar): Promise<number> {
   return (await read($, tasks)).at(-1)?.id ?? 0
+}
+
+/** 요청 · 세션 시작 훅의 작업: 도는 작업이 있으면 그것, 없으면 -1(다음 작업이 가져감) */
+async function hookTask($: StateDollar): Promise<number> {
+  const last = (await read($, tasks)).at(-1)
+  return last?.status === 'running' ? last.id : -1
+}
+
+/** 훅이 끼어든 일을 적는다(같은 일은 횟수만 올림) */
+async function addNotes($: StateDollar, items: readonly Omit<HookNote, 'count'>[]): Promise<void> {
+  if (items.length === 0) return
+  await update($, notes, list => {
+    const next = [...list]
+    for (const it of items) {
+      const i = next.findIndex(x => x.task === it.task && x.group === it.group && x.act === it.act && x.text === it.text)
+      const old = next[i]
+      if (old !== undefined) next[i] = { ...old, count: old.count + 1 }
+      else next.push({ ...it, count: 1 })
+    }
+    return next.slice(-100)
+  })
+}
+
+/** 도구 호출 하나에 훅이 한 일(막음 · 물음 · 고침 · 덧붙임) */
+async function noteToolHook(
+  $: StateDollar,
+  id: string | undefined,
+  r: { deny?: string; ask?: string; edited?: string; additionalContext?: readonly string[] },
+): Promise<void> {
+  const call = (await read($, calls)).find(c => c.id === id)
+  if (call === undefined || call.agent !== undefined) return
+  const where = { task: call.task, group: call.group }
+  await addNotes($, [
+    ...(r.deny !== undefined ? [{ ...where, act: 'block' as const, text: hookLine(r.deny) }] : []),
+    ...(r.ask !== undefined ? [{ ...where, act: 'ask' as const, text: hookLine(r.ask) }] : []),
+    ...(r.edited !== undefined ? [{ ...where, act: 'edit' as const, text: `${call.label} ${r.edited}` }] : []),
+    ...hookNotes(r, where),
+  ])
 }
 
 export const register: Register = on => {
@@ -184,13 +248,17 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       const last = (await read($, tasks)).at(-1)
       const text = clip(e.text, 200)
-      if (last !== undefined && (isContinuation(e.text) || text === last.request)) {
+      const continued = last !== undefined && (isContinuation(e.text) || text === last.request) ? last : undefined
+      // 작업이 시작되기 전에 훅이 한 일(요청 · 세션 시작)은 이 작업 것
+      const id = continued?.id ?? (last?.id ?? 0) + 1
+      await update($, notes, list => list.map(h => (h.task === -1 ? { ...h, task: id } : h)))
+      if (continued !== undefined) {
         await update($, tasks, list =>
-          list.map((t): Task => (t.id === last.id ? { ...t, status: 'running', turnAt: now } : t)),
+          list.map((t): Task => (t.id === continued.id ? { ...t, status: 'running', turnAt: now } : t)),
         )
       } else {
         const task: Task = {
-          id: (last?.id ?? 0) + 1,
+          id,
           request: isContinuation(e.text) ? '' : text,
           status: 'running',
           startedAt: now,
@@ -200,7 +268,7 @@ export const register: Register = on => {
         await update($, focus, () => 0) // 새 작업이 오면 그 작업을 본다
       }
     } else {
-      await update($, subs, list => list.map(s => (s.id === e.agentId ? { ...s, status: 'running', ms: undefined } : s)))
+      await update($, subs, list => list.map((s): Sub => (s.id === e.agentId ? { ...s, status: 'running', ms: undefined } : s)))
     }
 
     return next(e)
@@ -247,7 +315,7 @@ export const register: Register = on => {
           made = {
             n: (list.at(-1)?.n ?? 0) + 1,
             task,
-            title: said.title || '(설명 없이 시작)',
+            title: said.title || NO_TITLE,
             tools: [c.id],
             ...(said.step ? { step: said.step } : {}),
           }
@@ -280,7 +348,7 @@ export const register: Register = on => {
     const now = await $.clock.now()
     if (e.agentId !== undefined) {
       await update($, subs, list =>
-        list.map(s => (s.id === e.agentId ? { ...s, status: 'done', ms: now - s.startedAt } : s)),
+        list.map((s): Sub => (s.id === e.agentId ? { ...s, status: 'done', ms: now - s.startedAt } : s)),
       )
 
       return next(e)
@@ -297,6 +365,7 @@ export const register: Register = on => {
         mine,
         (await read($, groups)).filter(g => g.task === t.id),
         (await read($, evidence)).filter(x => x.task === t.id),
+        (await read($, notes)).filter(h => h.task === t.id),
         now,
         e.answer,
       )
@@ -336,7 +405,7 @@ export const register: Register = on => {
     await update($, subs, list => [...list, sub].slice(-30))
     const spawned = await next(e)
     await update($, subs, list =>
-      list.map(s =>
+      list.map((s): Sub =>
         s.key !== key ? s : spawned.deny !== undefined ? { ...s, status: 'denied' } : { ...s, id: spawned.agentId },
       ),
     )
@@ -363,8 +432,82 @@ export const register: Register = on => {
       ),
       ...crons.map(c => item(c.id, c.recurring ? '정기 작업 예약됨' : '다시 진행 예약됨')),
     ])
+    const r = await next(e)
+    try {
+      // 끝내려 할 때 훅이 막았으면(「테스트부터 돌려」 같은 되돌림) 지금 작업에 적는다
+      await addNotes($, hookNotes(r, { task: cur, group: 0, at: '끝낼' }))
+    } catch {
+      // 관찰 전용
+    }
+
+    return r
+  }).catch(($, e, next) => next(e))
+
+  // 사용자 설정 훅은 이 mod 아래에서 돈다: next 의 결과가 곧 훅들이 한 일
+  on('classic.PreToolUse', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      await noteToolHook($, e.tool_use_id, {
+        ...(r.deny !== undefined ? { deny: r.deny } : {}),
+        ...(r.ask !== undefined ? { ask: r.ask } : {}),
+        ...(r.updatedInput !== undefined ? { edited: '입력값을 바꿔 실행' } : {}),
+        ...(r.additionalContext !== undefined ? { additionalContext: r.additionalContext } : {}),
+      })
+    } catch {
+      // 관찰 전용: 다시 부르지 않게 여기서 삼킨다
+    }
+
+    return r
+  }).catch(($, e, next) => next(e))
+
+  on('classic.PostToolUse', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      const changed = r.updatedToolOutput !== undefined || r.updatedMCPToolOutput !== undefined
+      await noteToolHook($, e.tool_use_id, {
+        ...(changed ? { edited: '결과를 바꿔 전달' } : {}),
+        ...(r.additionalContext !== undefined ? { additionalContext: r.additionalContext } : {}),
+      })
+    } catch {
+      // 관찰 전용
+    }
+
+    return r
+  }).catch(($, e, next) => next(e))
+
+  on('classic.UserPromptSubmit', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      await addNotes($, hookNotes(r, { task: await hookTask($), group: 0, at: '요청' }))
+    } catch {
+      // 관찰 전용
+    }
+
+    return r
+  }).catch(($, e, next) => next(e))
+
+  // 규칙 문서(CLAUDE.md · .claude/rules)가 대화에 올라올 때: 무엇을 · 왜 불러왔나
+  on('classic.InstructionsLoaded', async ($, e, next) => {
+    try {
+      const task = await hookTask($)
+      const group = task === -1 ? 0 : ([...(await read($, groups))].reverse().find(g => g.task === task)?.n ?? 0)
+      await addNotes($, [{ task, group, act: 'load', text: loadedText(e.file_path, e.memory_type, e.load_reason) }])
+    } catch {
+      // 관찰 전용
+    }
 
     return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('classic.SessionStart', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      await addNotes($, hookNotes(r, { task: await hookTask($), group: 0, at: '세션 시작' }))
+    } catch {
+      // 관찰 전용
+    }
+
+    return r
   }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {
@@ -447,6 +590,7 @@ export const register: Register = on => {
     const bgs = await read($, bg)
     const done = await read($, stories)
     const open = await read($, opened)
+    const allNotes = await read($, notes)
     const t = ts.find(x => x.id === picked) ?? ts.at(-1)
     let now = t?.turnAt ?? 0
     try {
@@ -516,55 +660,73 @@ export const register: Register = on => {
 
     let used = 0
 
-    // 작업 목록: 요청마다 한 줄. 번호를 누르면 그 작업을 본다(가장 최근 작업을 누르면 다시 따라감)
+    // 작업 목록: 「진행 중」(노랑 테두리)과 「끝난 작업」(흐린 테두리) 상자로 나눈다.
+    // 번호를 누르면 그 작업을 본다(가장 최근 작업을 누르면 다시 따라감)
     const newestFirst = [...ts].reverse()
-    const listed = newestFirst.slice(0, 5)
+    const isActive = (x: Task) => x.status === 'running' || busy.has(x.id)
+    const activeTasks = newestFirst.filter(isActive)
+    const doneTasks = newestFirst.filter(x => !isActive(x))
+    const doneListed = doneTasks.slice(0, Math.max(1, 5 - activeTasks.length))
+    const boxInner = cols - 4 // 테두리 2칸 + 안쪽 여백 2칸
+    const taskRow = (x: Task) => {
+      const sel = x.id === t.id
+      const running = x.status === 'running'
+      const behind = !running && busy.has(x.id)
+      const glyph = running ? '▸' : behind ? '⊷' : x.status === 'answer' ? '✓' : x.status === 'aborted' ? '⊘' : '✗'
+      const color = running || behind ? 'warning' : x.status === 'answer' ? 'success' : 'error'
+      const meta = running
+        ? `${progressOf(x, callsOf(x.id), groupsOf(x.id)).pct}%`
+        : behind
+          ? '뒤에서 계속'
+          : `${DONE_LABEL[x.status]}${x.ms !== undefined ? `, ${duration(x.ms)}` : ''}`
+      const request = firstSentence(x.request, 60) || '(이어서 한 작업)'
+      used += linesOf(`${glyph} ${request}  ${meta}${sel ? '  보는 중' : ''}`, boxInner - 9)
+      return (
+        <Box flexDirection="row">
+          <Button
+            dimColor={!sel}
+            key={`task-${x.id}`}
+            onPress={async () => {
+              await update($, focus, () => (x.id === ts.at(-1)?.id ? 0 : x.id))
+            }}
+          >
+            {`${x.id}번`}
+          </Button>
+          <Box paddingLeft={1} flexShrink={1}>
+            <Text wrap="wrap" bold={sel} dimColor={!sel}>
+              <Text color={color}>{glyph}</Text> {request}
+              <Text dimColor>{`  ${meta}`}</Text>
+              {sel && <Text color={color}>{'  보는 중'}</Text>}
+            </Text>
+          </Box>
+        </Box>
+      )
+    }
+    const taskBox = (name: string, list: Task[], active: boolean, extra?: string) => {
+      used += 3 + (extra !== undefined ? 1 : 0) // 테두리 위아래 + 제목
+      return (
+        <Box
+          flexDirection="column"
+          borderStyle="round"
+          borderColor={active ? 'warning' : undefined}
+          borderDimColor={!active}
+          paddingX={1}
+        >
+          <Text bold color={active ? 'warning' : undefined}>{`${name} ${list.length}개`}</Text>
+          {list.map(taskRow)}
+          {extra !== undefined && <Text dimColor>{extra}</Text>}
+        </Box>
+      )
+    }
+    const olderDone = doneTasks.length - doneListed.length
     const taskList = multi ? (
       <Box flexDirection="column" marginBottom={1}>
-        <Text>
-          <Text bold>작업 {ts.length}개</Text>
-          <Text dimColor>{'  번호를 누르면 그 작업을 봅니다'}</Text>
-        </Text>
-        {listed.map(x => {
-          const sel = x.id === t.id
-          const running = x.status === 'running'
-          const behind = !running && busy.has(x.id)
-          const glyph = running ? '▸' : behind ? '⊷' : x.status === 'answer' ? '✓' : x.status === 'aborted' ? '⊘' : '✗'
-          const color = running || behind ? 'warning' : x.status === 'answer' ? 'success' : 'error'
-          const meta = running
-            ? `${progressOf(x, callsOf(x.id), groupsOf(x.id)).pct}%`
-            : behind
-              ? '뒤에서 계속'
-              : `${DONE_LABEL[x.status]}${x.ms !== undefined ? `, ${duration(x.ms)}` : ''}`
-          const request = firstSentence(x.request, 60) || '(이어서 한 작업)'
-          used += linesOf(`${x.id}번 ${glyph} ${request}  ${meta}`, cols)
-          return (
-            <Box flexDirection="row">
-              <Button
-                plain
-                dimColor={!sel}
-                key={`task-${x.id}`}
-                onPress={async () => {
-                  await update($, focus, () => (x.id === ts.at(-1)?.id ? 0 : x.id))
-                }}
-              >
-                {`${x.id}번`}
-              </Button>
-              <Box paddingLeft={1} flexShrink={1}>
-                <Text wrap="wrap" bold={sel} dimColor={!sel}>
-                  <Text color={color}>{glyph}</Text> {request}
-                  <Text dimColor>{`  ${meta}`}</Text>
-                </Text>
-              </Box>
-            </Box>
-          )
-        })}
-        {newestFirst.length > listed.length && (
-          <Text dimColor>{`      이전 작업 ${newestFirst.length - listed.length}개`}</Text>
-        )}
+        {activeTasks.length > 0 && taskBox('진행 중', activeTasks, true)}
+        {doneListed.length > 0 &&
+          taskBox('끝난 작업', doneListed, false, olderDone > 0 ? `이전 작업 ${olderDone}개` : undefined)}
       </Box>
     ) : null
-    used += multi ? 2 + (newestFirst.length > listed.length ? 1 : 0) : 0
+    used += multi ? 1 : 0
 
     const mine = callsOf(t.id)
     const gs = groupsOf(t.id)
@@ -593,14 +755,49 @@ export const register: Register = on => {
       </Text>
     )
 
+    // 훅 한 줄: ⚑ 를 상태 색으로(막음 빨강 · 묻기 · 고침 노랑)
+    const taskNotes = allNotes.filter(h => h.task === t.id)
+    // ponytail: 인자 이름을 h 로 두면 JSX 의 전역 h 를 가려 화면 전체가 건너뛰어진다
+    const HookRow = (note: HookNote, prefix = '') => (
+      <Text wrap="wrap">
+        <Text bold color={HOOK_COLOR[note.act]}>
+          ⚑
+        </Text>{' '}
+        {note.act === 'load' ? '' : prefix}
+        {hookLabel(note)}
+      </Text>
+    )
+    // 근거 한 줄 + 그 아래 흐리게 「왜: 그 단계에서 쓴 이유 문장」
+    const ItemRows = (i: Item) => (
+      <Box flexDirection="column">
+        <Text wrap="wrap">{itemText(i)}</Text>
+        {i.why !== undefined &&
+          Indent(
+            2,
+            <Text dimColor wrap="wrap">
+              왜: {i.why}
+            </Text>,
+          )}
+      </Box>
+    )
+    const itemLines = (i: Item, width: number) =>
+      linesOf(itemText(i), width) + (i.why !== undefined ? linesOf(`왜: ${i.why}`, width - 2) : 0)
+
     let head: JSX.Element
     const asks = (t.asks ?? []).slice(-2)
     if (isRunning) {
-      used += rowLines('지금', nowText) + 3 + asks.reduce((n, a) => n + rowLines('추가 요청', a), 0)
+      // 단계 밖에서 훅이 한 일(요청 · 세션 시작 때 덧붙인 지시)은 위에
+      const outer = taskNotes.filter(h => h.group === 0).slice(-3)
+      used +=
+        rowLines('지금', nowText) +
+        3 +
+        asks.reduce((n, a) => n + rowLines('추가 요청', a), 0) +
+        outer.reduce((n, h) => n + linesOf(`⚑ 훅이 ${hookLabel(h)}`, cols), 0)
       head = (
         <Box flexDirection="column">
           {Row('지금', nowText, { bold: true })}
           {asks.map(a => Row('추가 요청', firstSentence(a)))}
+          {outer.map(h => HookRow(h, '훅이 '))}
           <Progress label="진행" value={pct} max={100} valueText={pctText} />
           {phaseRow}
         </Box>
@@ -608,19 +805,17 @@ export const register: Register = on => {
     } else if (story) {
       // 카드: 굵은 제목 아래 한 줄에 하나씩(쉼표로 잇지 않음). 확인한 것은 종류별 개수를 두 칸씩.
       const inner = cols - 2
-      const lists: [string, string[]][] = (
+      const requests = [
+        firstSentence(story.request) || '(이어서 한 작업)',
+        ...(story.asks ?? []).map(a => `작업 중 추가: ${firstSentence(a)}`),
+      ]
+      // 쓴 스킬 · 따른 지침 · 판단 근거: 한 줄에 하나 + 「왜:」
+      const lists: [string, Item[]][] = (
         [
-          [
-            '요청',
-            [
-              firstSentence(story.request) || '(이어서 한 작업)',
-              ...(story.asks ?? []).map(a => `작업 중 추가: ${firstSentence(a)}`),
-            ],
-          ],
           ['쓴 스킬', story.skills],
           ['따른 지침', story.guides],
           ['판단 근거', story.basis],
-        ] as [string, string[]][]
+        ] as [string, Item[]][]
       ).filter(([, items]) => items.length > 0)
       const checks: { glyph: string; text: string; color?: 'success' | 'error' }[] = story.unverified
         ? [{ glyph: '✗', text: '바꾼 뒤 검증하지 않았습니다', color: 'error' }]
@@ -632,19 +827,13 @@ export const register: Register = on => {
       const half = Math.floor(inner / 2)
       used +=
         3 +
-        lists.reduce((n, [, items]) => n + 1 + items.reduce((k, x) => k + linesOf(x, inner), 0), 0) +
+        1 +
+        requests.reduce((k, x) => k + linesOf(x, inner), 0) +
+        lists.reduce((n, [, items]) => n + 1 + items.reduce((k, x) => k + itemLines(x, inner), 0), 0) +
+        (story.hooks.length > 0 ? 1 + story.hooks.reduce((k, h) => k + linesOf(`⚑ ${hookLabel(h)}`, inner), 0) : 0) +
         (story.sources.length > 0 ? 1 + Math.ceil(story.sources.length / 2) : 0) +
         1 +
         checks.length
-      const Items = (items: string[]) =>
-        Indent(
-          2,
-          <Box flexDirection="column">
-            {items.map(x => (
-              <Text wrap="wrap">{x}</Text>
-            ))}
-          </Box>,
-        )
       head = (
         <Box flexDirection="column">
           <Text>
@@ -655,12 +844,27 @@ export const register: Register = on => {
               {story.ms !== undefined ? `, ${duration(story.ms)}` : ''}
             </Text>
           </Text>
+          {Section('요청')}
+          {Indent(
+            2,
+            <Box flexDirection="column">
+              {requests.map(x => (
+                <Text wrap="wrap">{x}</Text>
+              ))}
+            </Box>,
+          )}
           {lists.map(([name, items]) => (
             <Box flexDirection="column">
               {Section(name)}
-              {Items(items)}
+              {Indent(2, <Box flexDirection="column">{items.map(ItemRows)}</Box>)}
             </Box>
           ))}
+          {story.hooks.length > 0 && (
+            <Box flexDirection="column">
+              {Section('훅 · 규칙')}
+              {Indent(2, <Box flexDirection="column">{story.hooks.map(h => HookRow(h))}</Box>)}
+            </Box>
+          )}
           {story.sources.length > 0 && (
             <Box flexDirection="column">
               {Section('확인한 것')}
@@ -701,7 +905,7 @@ export const register: Register = on => {
     // 표시가 하나도 없는 작업에선 문장마다 큰 단계.
     const byGroup = (n: number) => mine.filter(c => c.group === n)
     const orphan = byGroup(0)
-    const shown: Group[] = [...(orphan.length > 0 ? [{ n: 0, task: t.id, title: '(설명 없이 시작)', tools: [] }] : []), ...gs]
+    const shown: Group[] = [...(orphan.length > 0 ? [{ n: 0, task: t.id, title: NO_TITLE, tools: [] }] : []), ...gs]
     type Major = { lead: Group; subs: Group[]; label: string }
     const majors: Major[] = []
     let marked = false
@@ -713,19 +917,20 @@ export const register: Register = on => {
         majors.push({ lead: g, subs: [], label: g.step ? groupLabel(g) : g.n === 0 ? '' : `(${majors.length + 1})` })
       }
     }
-    const refOf = new Map<number, string>()
-    for (const m of majors) for (const g of [m.lead, ...m.subs]) refOf.set(g.n, m.label)
-
-    // 근거: 판단에 쓴 것(커밋 · 외부 · 지침 · 스킬)만
-    const kinds = [...ev]
+    // 아래 「판단 근거」 칸(작업 중에만): 커밋 · 외부 근거 최근 3개 + 왜.
+    // 지침 · 스킬은 흐름에서 그 단계 바로 아래에 보인다.
+    const basisNow = [...ev]
+      .filter(x => x.kind === 'commit' || x.kind === 'external')
       // 종류 순서대로, 같은 종류 안에선 나중 단계(최근에 찾은 것)부터
       .sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind) || b.group - a.group)
-      .slice(0, 4)
+      .slice(0, 3)
+      .map(x => withWhy(x, gs))
+    const basisRows = basisNow.length > 0 ? 2 + basisNow.reduce((n, i) => n + itemLines(i, cols - 2), 0) : 0
     const pending = isRunning && step ? Math.max(0, step.m - step.n) : 0
-    let budget = Math.max(4, rows - used - 3 - (pending > 0 ? 1 : 0) - (kinds.length > 0 ? kinds.length + 2 : 0))
+    let budget = Math.max(4, rows - used - 2 - (pending > 0 ? 1 : 0) - basisRows)
     // 끝나면 작업 설명 카드에 근거가 있으니 아래 칸은 작업 중에만
-    const showEvidence = isRunning && kinds.length > 0 && budget >= 4
-    if (!showEvidence && kinds.length > 0) budget += kinds.length + 2
+    const showBasis = isRunning && basisNow.length > 0 && budget >= 4
+    if (!showBasis) budget += basisRows
 
     const blocks: JSX.Element[] = []
     let hidden = 0
@@ -770,11 +975,21 @@ export const register: Register = on => {
           }
         }
         const shownDetail = detail.slice(-20)
+        // 이 단계에서 따른 지침 · 쓴 스킬 · 훅이 한 일: 접혀 있어도 제목 바로 아래에
+        const inStep = (g: number) => members.some(x => x.n === g)
+        const stepGuides = ev.filter(x => (x.kind === 'guide' || x.kind === 'skill') && inStep(x.group)).slice(0, 3)
+        const stepHooks = taskNotes.filter(h => h.group !== 0 && inStep(h.group)).slice(-2)
+        // 펼칠 것이 있을 때만 버튼: 테두리 있는 [ ▾ 펼치기 ] 로 크게
+        const hasDetail = items.length > 0 || m.subs.length > 0
+        const toggle = isOpen ? '▴ 접기' : '▾ 펼치기'
+        const summaryText = isLive && summary !== '' ? `지금까지 ${summary}` : summary
         const need =
-          linesOf(headText, cols - 3) +
-          (latestSub ? linesOf(`↳ ${latestSub.title}`, cols - 4) : 0) +
-          (live ? linesOf(`⊷ ${live.label} 중 00초`, cols - 4) : 0) +
-          (!isOpen && summary !== '' ? 1 : 0) +
+          linesOf(headText, cols) +
+          stepGuides.reduce((n, x) => n + linesOf(`지침 ${x.text}`, cols - 2), 0) +
+          stepHooks.reduce((n, h) => n + linesOf(`⚑ 훅이 ${hookLabel(h)}`, cols - 2), 0) +
+          (latestSub ? linesOf(`↳ ${latestSub.title}`, cols - 2) : 0) +
+          (live ? linesOf(`⊷ ${live.label} 중 00초`, cols - 2) : 0) +
+          (hasDetail || summary !== '' ? linesOf(`[ ${toggle} ] ${summaryText}`, cols - 2) : 0) +
           shownDetail.length
         if (!isNewest && budget - need < 0) {
           hidden += 1
@@ -783,41 +998,52 @@ export const register: Register = on => {
         budget -= need
         blocks.unshift(
           <Box flexDirection="column">
-            <Box flexDirection="row">
-              <Button
-                plain
-                dimColor
-                key={`step-${m.lead.n}`}
-                onPress={async () => {
-                  await update($, opened, list =>
-                    list.includes(m.lead.n) ? list.filter(x => x !== m.lead.n) : [...list, m.lead.n],
-                  )
-                }}
-              >
-                {isOpen ? '-' : '+'}
-              </Button>
-              <Box paddingLeft={1} flexShrink={1}>
-                <Text wrap="wrap" bold={isNewest} dimColor={!isNewest && !isOpen}>
-                  <Text color={isLive ? 'warning' : 'success'}>{glyph}</Text> {m.label ? `${m.label} ` : ''}
-                  {m.lead.title}
-                </Text>
-              </Box>
-            </Box>
-            {latestSub && Indent(4, <Text wrap="wrap">↳ {latestSub.title}</Text>)}
+            <Text wrap="wrap" bold={isNewest} dimColor={!isNewest && !isOpen}>
+              <Text color={isLive ? 'warning' : 'success'}>{glyph}</Text> {m.label ? `${m.label} ` : ''}
+              {m.lead.title}
+            </Text>
+            {stepGuides.map(x =>
+              Indent(
+                2,
+                <Text wrap="wrap">
+                  <Text bold>{x.kind === 'skill' ? '스킬' : '지침'}</Text> {x.text}
+                </Text>,
+              ),
+            )}
+            {stepHooks.map(h => Indent(2, HookRow(h, '훅이 ')))}
+            {latestSub && Indent(2, <Text wrap="wrap">↳ {latestSub.title}</Text>)}
             {live &&
               Indent(
-                4,
+                2,
                 <Text wrap="wrap">
                   <Text color="warning">⊷</Text> {live.label} 중 <Text dimColor>{duration(now - live.startedAt)}</Text>
                 </Text>,
               )}
-            {!isOpen &&
-              summary !== '' &&
+            {(hasDetail || summary !== '') &&
               Indent(
-                4,
-                <Text dimColor wrap="wrap">
-                  {isLive ? `지금까지 ${summary}` : summary}
-                </Text>,
+                2,
+                <Box flexDirection="row">
+                  {hasDetail && (
+                    <Button
+                      dimColor={!isNewest && !isOpen}
+                      key={`step-${m.lead.n}`}
+                      onPress={async () => {
+                        await update($, opened, list =>
+                          list.includes(m.lead.n) ? list.filter(x => x !== m.lead.n) : [...list, m.lead.n],
+                        )
+                      }}
+                    >
+                      {toggle}
+                    </Button>
+                  )}
+                  {summary !== '' && (
+                    <Box paddingLeft={hasDetail ? 1 : 0} flexShrink={1}>
+                      <Text dimColor wrap="wrap">
+                        {summaryText}
+                      </Text>
+                    </Box>
+                  )}
+                </Box>,
               )}
             {shownDetail}
           </Box>,
@@ -834,7 +1060,6 @@ export const register: Register = on => {
             {hidden > 0 && Indent(2, <Text dimColor>이전 단계 {hidden}개</Text>)}
             {blocks}
             {pending > 0 && Indent(2, <Text dimColor>◦ 남은 단계 {pending}개</Text>)}
-            <Text dimColor>+ 를 누르면 단계 안의 세부 동작이 펼쳐집니다</Text>
           </Box>
         )}
         {bgRows > 0 && (
@@ -865,15 +1090,10 @@ export const register: Register = on => {
             ))}
           </Box>
         )}
-        {showEvidence && (
+        {showBasis && (
           <Box flexDirection="column" marginTop={1}>
-            {Section('근거')}
-            {kinds.map(x => (
-              <Text wrap="wrap">
-                [{TAG[x.kind]}] {x.text}
-                {x.count > 1 ? ` x${x.count}` : ''} {x.group > 0 ? (refOf.get(x.group) ?? '') : ''}
-              </Text>
-            ))}
+            {Section('판단 근거')}
+            {basisNow.map(i => Indent(2, ItemRows(i)))}
           </Box>
         )}
         {hudBox}

@@ -5,6 +5,7 @@ import {
   citedCommits,
   countActions,
   evidenceOf,
+  hookLine,
   labelOf,
   linesOf,
   parseNarration,
@@ -128,9 +129,10 @@ describe('한국어 동작 이름과 단계', () => {
       where: 'proj',
       request: '이 네모 버튼 이상해',
       status: 'answer',
-      skills: ['디자인-반영'],
-      guides: ['디자인 우선순위'],
-      basis: ['a1b2c3d4 radius 토큰 통일'],
+      skills: [{ kind: 'skill', text: '디자인-반영' }],
+      guides: [{ kind: 'guide', text: '디자인 우선순위', why: '판단 기준을 먼저 잡습니다' }],
+      basis: [{ kind: 'commit', text: 'a1b2c3d4 radius 토큰 통일' }],
+      hooks: [{ task: 1, group: 0, act: 'note', at: '요청', text: '존댓말로 답할 것.', count: 1 }],
       steps: ['네모가 된 이유부터 찾습니다', 'radius 를 원으로 고칩니다'],
       checks: ['타입 검사 통과'],
       unverified: false,
@@ -139,7 +141,10 @@ describe('한국어 동작 이름과 단계', () => {
       ms: 130_000,
     })
     expect(text).toContain('- 쓴 스킬: 디자인-반영')
-    expect(text).toContain('- 따른 지침: 디자인 우선순위')
+    expect(text).toContain('- 따른 지침: 디자인 우선순위 (왜: 판단 기준을 먼저 잡습니다)')
+    expect(text).toContain('- 훅 · 규칙: 요청 때 지시를 덧붙임: 존댓말로 답할 것.')
+    // 기록 파일엔 해시까지 남겨 「어떻게 했어?」에 답할 수 있게
+    expect(text).toContain('- 근거: a1b2c3d4 radius 토큰 통일')
     expect(text).toContain('- 확인한 것: 소스 12개, 검색 3번 (걸린 시간 2분 10초)')
     expect(text).toContain('  2. radius 를 원으로 고칩니다')
     expect(text).toContain('- 검증: 타입 검사 통과')
@@ -227,9 +232,14 @@ test('흐름: 지난 단계는 요약 한 줄, 지금 단계는 하는 일 + 경
     expect((await ui.find({ type: 'Text', text: /\[2\/3\]/ }))?.text).toBe('▸ [2/3] 버튼 파일을 읽습니다')
     expect((await ui.find({ type: 'Text', text: /^⊷/ }))?.text).toMatch(/^⊷ 소스 확인 중 \d+초$/)
     expect((await ui.find({ text: /남은 단계 1개/ })) !== undefined).toBe(true)
-    // 근거: 커밋 · 지침만, 파일 이름은 없음
-    expect((await ui.find({ type: 'Text', text: /\[커밋\]/ }))?.text).toBe('[커밋] a1b2c3d4 radius 토큰 통일 [1/3]')
-    expect((await ui.find({ type: 'Text', text: /\[지침\]/ }))?.text).toBe('[지침] 디자인 우선순위 [2/3]')
+    // 판단 근거: 무엇을 봤나 + 「왜:」(그 단계에서 쓴 문장). 해시 · 파일 이름은 없음
+    expect((await ui.find({ type: 'Text', text: /^변경 기록/ }))?.text).toBe('변경 기록 「radius 토큰 통일」')
+    expect((await ui.find({ type: 'Text', text: /^왜: 네모가/ }))?.text).toBe(
+      '왜: 네모가 된 이유부터 찾으려고 버튼 파일의 변경 이력을 보고 관련 파일을 여러 개 훑어봅니다',
+    )
+    expect(await ui.find({ text: /a1b2c3d4/ })).toBe(undefined)
+    // 지침은 그 단계 바로 아래에
+    expect((await ui.find({ type: 'Text', text: /^지침 / }))?.text).toBe('지침 디자인 우선순위')
     expect(await ui.find({ text: /a\.tsx|b\.tsx|Button\.tsx/ })).toBe(undefined)
     expect((await ui.find({ type: 'Text', text: /대화 용량/ }))?.text).toBe('Opus 5.5 | 대화 용량 45% | 5시간 한도 23%')
     expect(await ui.find({ text: /비밀 생각/ })).toBe(undefined)
@@ -321,8 +331,8 @@ test('끝난 카드: 긴 요청은 첫 문장, 지침은 메모 목차의 한글
     '디자인-반영',
     '디자인 우선순위',
     '점검 (디자인-반영 스킬)',
-    'a1b2c3d4 radius 토큰 통일',
-    '9f8e7d6 버튼 추가',
+    '변경 기록 「radius 토큰 통일」',
+    '변경 기록 「버튼 추가」',
     '지침 메모 1개',
     'AI 문서 1개',
     '변경 이력 1번',
@@ -426,8 +436,10 @@ test('요청마다 작업 하나: 새 요청이 와도 지난 작업은 목록�
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect((await ui.find({ type: 'Text', text: /^작업 2개/ }))?.text).toBe('작업 2개  번호를 누르면 그 작업을 봅니다')
-    expect((await ui.find({ type: 'Text', text: /버튼 높이도/ }))?.text).toBe('▸ 버튼 높이도 맞춰줘  17%')
+    // 1번은 끝났지만 도우미가 돌아서 둘 다 「진행 중」 상자
+    expect((await ui.find({ type: 'Text', text: /^진행 중/ }))?.text).toBe('진행 중 2개')
+    expect(await ui.find({ type: 'Text', text: /^끝난 작업/ })).toBe(undefined)
+    expect((await ui.find({ type: 'Text', text: /버튼 높이도/ }))?.text).toBe('▸ 버튼 높이도 맞춰줘  17%  보는 중')
     // 1번 작업은 끝났지만 도우미가 아직 돌아서 「뒤에서 계속」
     expect((await ui.find({ type: 'Text', text: /네모 버튼/ }))?.text).toBe('⊷ 이 네모 버튼 이상해  뒤에서 계속')
     expect((await ui.find({ text: /1\/3단계 17%/ })) !== undefined).toBe(true)
@@ -442,6 +454,64 @@ test('요청마다 작업 하나: 새 요청이 와도 지난 작업은 목록�
     expect((await ui.find({ type: 'Text', text: /\[1\/3\]/ }))?.text).toBe('▸ [1/3] 높이 값을 찾습니다')
     await ui.unmount()
   }
+  // 2번이 끝나면 「끝난 작업」 상자로 옮겨 간다
+  await $.turn.complete({ answer: '', durationMs: 5000, isAborted: false, turnId: 't2', reason: 'answer' } as never)
+  const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await after.find({ type: 'Text', text: /^진행 중/ }))?.text).toBe('진행 중 1개')
+  expect((await after.find({ type: 'Text', text: /^끝난 작업/ }))?.text).toBe('끝난 작업 1개')
+  expect((await after.find({ type: 'Text', text: /버튼 높이도/ }))?.text).toBe('✓ 버튼 높이도 맞춰줘  끝남, 5초  보는 중')
+  await after.unmount()
+})
+
+test('훅이 한 일: 막으면 그 단계 아래 빨간 ⚑, 요청에 덧붙인 지시 · 불러온 규칙은 위에, 끝나면 카드의 「훅 · 규칙」', async ($, on) => {
+  engine(on)
+  on('turn.step', async function* () {
+    return yield* say('[1/2] 디스크 상태를 봅니다', 'u1', 'Bash')()
+  })
+  on('tool.call', () => ({ result: {}, text: '' }))
+  on('classic.PreToolUse', () => ({
+    deny: "resource-guard: 메모리/디스크 위험 수준(cpu=39% disk=0.3GB)이 45s 동안 안 풀려 'Bash' 호출을 보류했습니다. 줄인 뒤 다시 시도하세요.",
+  }))
+  on('classic.UserPromptSubmit', () => ({ additionalContext: ['존댓말로 답할 것. 반말은 쓰지 않는다.'] }))
+  on('classic.InstructionsLoaded', () => ({}))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  // 규칙 문서 · 요청 훅은 작업이 시작되기 전에 돈다 → 그 작업이 가져간다
+  await $.classic.InstructionsLoaded({
+    file_path: 'C:\\Users\\u\\.claude\\CLAUDE.md',
+    memory_type: 'User',
+    load_reason: 'session_start',
+  } as never)
+  await $.classic.UserPromptSubmit({ prompt: '디스크 봐줘' } as never)
+  await $.turn.start({ text: '디스크 봐줘', turnId: 't1' })
+  await drain($.turn.step({ turnId: 't1', index: 0, model: 'opus', messageCount: 1 }))
+  await $.tool.call({ tool: 'Bash', command: 'df -h', description: '디스크 보기', tool_use_id: 'u1' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'df -h', description: '디스크 보기', tool_use_id: 'u1b' } as never)
+
+  const blocked = "막음: resource-guard: 메모리/디스크 위험 수준이 45s 동안 안 풀려 'Bash' 호출을 보류했습니다. (2번)"
+  const loaded = '규칙 문서를 불러옴: CLAUDE.md (사용자 전체 · 세션 시작)'
+  const mid = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await mid.find({ type: 'Text', text: /^⚑ 훅이 요청/ }))?.text).toBe('⚑ 훅이 요청 때 지시를 덧붙임: 존댓말로 답할 것.')
+  // 규칙 문서는 훅이 한 일이 아니라 「훅이」를 붙이지 않는다
+  expect((await mid.find({ type: 'Text', text: /^⚑ 규칙 문서/ }))?.text).toBe(`⚑ ${loaded}`)
+  expect((await mid.find({ type: 'Text', text: /^⚑ 훅이 막음/ }))?.text).toBe(`⚑ 훅이 ${blocked}`)
+  expect(await mid.find({ text: /cpu=/ })).toBe(undefined)
+  await mid.unmount()
+
+  await $.turn.complete({ answer: '', durationMs: 3000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: '훅 · 규칙' }))?.text).toBe('훅 · 규칙')
+  expect((await ui.find({ type: 'Text', text: /^⚑ 막음/ }))?.text).toBe(`⚑ ${blocked}`)
+  await ui.unmount()
+  // 막음 → 덧붙인 지시 → 불러온 규칙 순
+  const r = await $.command.run({ command: 'trace', args: '설명' } as never)
+  expect(r.text).toContain(`- 훅 · 규칙: ${blocked}; 요청 때 지시를 덧붙임: 존댓말로 답할 것.; ${loaded}`)
+})
+
+test('훅 글은 첫 줄만: 태그 줄 · 머리표는 건너뛴다', async () => {
+  expect(hookLine('<EXTREMELY_IMPORTANT>\nYou have superpowers.\nmore')).toBe('You have superpowers.')
+  expect(hookLine('# 이전 세션 핸드오프\n내용')).toBe('이전 세션 핸드오프')
+  expect(hookLine('\n\n')).toBe('')
 })
 
 test('이어서 하는 턴(백그라운드 알림 · 빈 글 · 같은 글 반복)은 새 작업이 아니라 진행률과 흐름을 이어 간다', async ($, on) => {

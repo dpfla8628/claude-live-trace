@@ -28,6 +28,23 @@ export type Group = { n: number; task: number; title: string; tools: string[]; s
 export type EvidenceKind = 'commit' | 'external' | 'guide' | 'skill'
 export type Evidence = { kind: EvidenceKind; text: string; task: number; group: number; count: number }
 
+/** 카드의 근거 한 줄: 무엇을 봤나(text) + 그 단계에서 Claude 가 쓴 이유 문장(why) */
+export type Item = { kind: EvidenceKind; text: string; why?: string }
+
+/** 사용자 설정 훅이 끼어든 일: 막음 · 확인을 물음 · 고침 · 지시를 덧붙임, 그리고 규칙 문서(CLAUDE.md 등)를 불러옴 */
+export type HookAct = 'block' | 'ask' | 'edit' | 'note' | 'load'
+export type HookNote = {
+  /** 작업 번호, -1 = 아직 작업이 없을 때(요청 · 세션 시작): 다음 작업이 가져감 */
+  task: number
+  /** 묶음 번호, 0 = 단계 밖(요청 · 세션 시작 · 끝낼 때) */
+  group: number
+  act: HookAct
+  /** 단계 밖일 때 언제: 요청 · 세션 시작 · 끝낼 */
+  at?: string
+  text: string
+  count: number
+}
+
 export type TurnStatus = 'idle' | 'running' | 'answer' | 'aborted' | 'refusal' | 'error'
 
 /** 사용자 요청 하나 = 작업 하나. 이어서 하는 턴(백그라운드 알림 · 반복 예약)은 같은 작업에 붙는다 */
@@ -69,9 +86,11 @@ export type Story = {
   /** 작업 중에 더 받은 요청 */
   asks?: string[]
   status: TurnStatus
-  skills: string[]
-  guides: string[]
-  basis: string[]
+  skills: Item[]
+  guides: Item[]
+  basis: Item[]
+  /** 훅이 끼어든 일 */
+  hooks: HookNote[]
   steps: string[]
   checks: string[]
   unverified: boolean
@@ -96,6 +115,8 @@ declare module 'claude-code' {
       stories: Shaped<Story[]>
       /** 사람이 펼친 단계 번호 */
       opened: Shaped<number[]>
+      /** 훅이 끼어든 일 */
+      notes: Shaped<HookNote[]>
     }
   }
 }
