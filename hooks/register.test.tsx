@@ -6,7 +6,10 @@ import {
   countActions,
   evidenceOf,
   hookLine,
+  hostLevel,
+  hostWarning,
   labelOf,
+  parseHost,
   linesOf,
   parseNarration,
   phaseOf,
@@ -163,7 +166,12 @@ describe('한국어 동작 이름과 단계', () => {
   })
 })
 
-const engine = (on: On) => {
+type Ran = { exitCode: number; stdout: string; stderr: string }
+const engine = (on: On, opts: { env?: Record<string, string>; run?: (argv: readonly string[]) => Ran } = {}) => {
+  // 디스크 · 메모리 재기 · 정리 명령: 답을 안 주면 실패로(패널은 그 줄만 뺀다)
+  on('process.run', (_, e) => ({
+    value: { isStdoutTruncated: false, isStderrTruncated: false, ...(opts.run?.(e.argv) ?? { exitCode: 1, stdout: '', stderr: '' }) },
+  }))
   on('command.register', () => ({ value: { command: 'trace' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -173,7 +181,7 @@ const engine = (on: On) => {
   on('session.usage', () => ({
     value: { startedAt: 0, context: { window: 1000, percent: 45 }, rateLimits: [{ kind: 'five_hour', percentUsed: 23 }] },
   }))
-  on('env.get', () => ({ value: undefined }))
+  on('env.get', (_, e) => ({ value: opts.env?.[e.name] }))
   on('clock.every', () => ({ value: () => undefined }) as never)
   let now = 1000
   on('clock.now', () => ({ value: (now += 100) }))
@@ -572,6 +580,77 @@ test('작업 중에 친 요청은 지금 작업의 「추가 요청」으로 보
   await ui.unmount()
   const r = await $.command.run({ command: 'trace', args: '설명' } as never)
   expect(r.text).toContain('- 작업 중 추가 요청: 그 다음엔 높이 값도 알려줘. 고치지는 마.')
+})
+
+test('컴퓨터 여유: 선은 resource-guard 와 같다(디스크 2GB · 메모리 90% · 가용 2GB)', async () => {
+  expect(hostLevel({ diskGB: 1.9, memPct: 50, memFreeMB: 9000 })).toBe('critical')
+  expect(hostLevel({ diskGB: 20, memPct: 91, memFreeMB: 9000 })).toBe('critical')
+  expect(hostLevel({ diskGB: 20, memPct: 50, memFreeMB: 1500 })).toBe('critical')
+  expect(hostLevel({ diskGB: 3, memPct: 50, memFreeMB: 9000 })).toBe('warn')
+  expect(hostLevel({ diskGB: 20, memPct: 50, memFreeMB: 9000 })).toBe('ok')
+  expect(hostWarning({ diskGB: 1, memPct: 50, memFreeMB: 9000 })).toBe('디스크가 모자라 셸 명령이 잠시 멈춥니다')
+  expect(hostWarning({ diskGB: 20, memPct: 50, memFreeMB: 9000 })).toBe(undefined)
+  // 디스크를 못 쟀거나(-1) 모양이 틀리면 줄을 띄우지 않는다
+  expect(parseHost('{"diskGB":-1,"memPct":1,"memFreeMB":1}')).toBe(undefined)
+  expect(parseHost('x')).toBe(undefined)
+  expect(parseHost('{"diskGB":3.7,"memPct":61.5,"memFreeMB":9000}')).toEqual({ at: 0, diskGB: 3.7, memPct: 61.5, memFreeMB: 9000 })
+})
+
+test('컴퓨터 여유: 디스크가 2GB 아래면 뒤에서 정리하고 알리며, [ 정리하기 ] 로도 돌린다', async ($, on) => {
+  const disks = [1.5, 1.5, 3.1, 3.1, 3.1, 4.2]
+  const ran: string[] = []
+  const toasts: string[] = []
+  engine(on, {
+    env: { LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local' },
+    run: argv => {
+      ran.push(String(argv[0]))
+      return argv[0] === 'node'
+        ? { exitCode: 0, stdout: JSON.stringify({ diskGB: disks.shift() ?? 4.2, memPct: 61.5, memFreeMB: 9000 }), stderr: '' }
+        : { exitCode: 0, stdout: '', stderr: '' }
+    },
+  })
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  const settle = async (n: number) => {
+    for (let i = 0; i < 200_000 && toasts.length < n; i++) await Promise.resolve()
+  }
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await settle(1)
+  // 처음 잼(1.5) → 정리 전에 다시 잼 → 정리 → 정리 뒤 잼
+  expect(ran).toEqual(['node', 'node', 'powershell', 'node'])
+  expect(toasts).toEqual(['디스크 자동 정리: 1.5GB → 3.1GB'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /^C 여유/ }))?.text).toMatch(
+    /^C 여유 3\.1GB · 메모리 61\.5% {2}\d\d:\d\d 자동 정리 1\.5 → 3\.1GB$/,
+  )
+  expect(await ui.find({ type: 'Text', text: /^⚠/ })).toBe(undefined)
+  // 손으로 누르면 30분 안이어도 돈다
+  await ui.press({ key: 'clean' })
+  await settle(2)
+  expect(toasts[1]).toBe('디스크 정리: 3.1GB → 3.1GB')
+  await ui.unmount()
+})
+
+test('컴퓨터 여유: 메모리가 모자라면 맨 위에 빨간 안내(정리는 디스크만)', async ($, on) => {
+  const ran: string[] = []
+  engine(on, {
+    run: argv => {
+      ran.push(String(argv[0]))
+      return { exitCode: 0, stdout: JSON.stringify({ diskGB: 40, memPct: 93, memFreeMB: 1200 }), stderr: '' }
+    },
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  for (let i = 0; i < 200_000 && ran.length === 0; i++) await Promise.resolve()
+  for (let i = 0; i < 2_000; i++) await Promise.resolve()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /^⚠/ }))?.text).toBe(
+    '⚠ 메모리가 모자라 셸 명령이 잠시 멈춥니다 — 브라우저 탭 · 개발 서버를 줄이면 풀립니다',
+  )
+  expect(ran).toEqual(['node'])
+  await ui.unmount()
 })
 
 test('아무 일도 없을 때 안내 문구', async $ => {

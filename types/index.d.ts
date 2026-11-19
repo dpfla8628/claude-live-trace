@@ -73,6 +73,18 @@ export type Sub = {
   ms?: number
 }
 
+/** 이 컴퓨터의 여유. 모든 세션이 ~/.claude/live-trace/host.json 하나를 같이 읽고 씀 */
+export type Host = {
+  at: number
+  diskGB: number
+  memPct: number
+  memFreeMB: number
+  /** 마지막으로 정리를 시작한 때(모든 세션 공통 — 30분 안엔 자동 정리를 다시 안 함) */
+  cleanAt?: number
+}
+/** 이 세션에서 한 디스크 정리. afterGB 가 없으면 도는 중 */
+export type Cleanup = { at: number; beforeGB: number; afterGB?: number; auto: boolean }
+
 /** 백그라운드 셸 · 감시 · 예약 */
 export type Bg = { id: string; label: string; task: number }
 
@@ -117,6 +129,10 @@ declare module 'claude-code' {
       opened: Shaped<number[]>
       /** 훅이 끼어든 일 */
       notes: Shaped<HookNote[]>
+      /** 디스크 · 메모리 여유(마지막으로 읽은 값) */
+      host: Shaped<Host>
+      /** 이 세션에서 한 디스크 정리 */
+      cleans: Shaped<Cleanup[]>
     }
   }
 }

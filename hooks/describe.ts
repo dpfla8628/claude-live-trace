@@ -1,5 +1,5 @@
 // 도구 호출을 사람이 읽는 한국어로 바꾸는 순수 함수들(엔진 호출 없음)
-import type { Evidence, Group, HookAct, HookNote, Item, Phase, Story } from '../types'
+import type { Evidence, Group, HookAct, HookNote, Host, Item, Phase, Story } from '../types'
 
 type Args = Record<string, unknown>
 
@@ -330,7 +330,39 @@ export const parseNarration = (text: string): { title: string; step?: { n: numbe
 
 export const groupLabel = (g: Pick<Group, 'n' | 'step'>): string => (g.step ? `[${g.step.n}/${g.step.m}]` : `(${g.n})`)
 
-const hhmm = (ms: number) => {
+// resource-guard 와 같은 선: 이 아래로 내려가면 셸 · 도우미 호출이 멈춘다
+export const DISK_MIN_GB = 2
+const MEM_MAX_PCT = 90
+const MEM_MIN_FREE_MB = 2048
+export type HostLevel = 'ok' | 'warn' | 'critical'
+type HostNums = Pick<Host, 'diskGB' | 'memPct' | 'memFreeMB'>
+const diskLow = (h: HostNums) => h.diskGB < DISK_MIN_GB
+const memLow = (h: HostNums) => h.memPct > MEM_MAX_PCT || h.memFreeMB < MEM_MIN_FREE_MB
+/** 멈춤(빨강) · 곧 멈춤(노랑: 디스크 5GB 아래 · 메모리 80% 넘음) · 괜찮음 */
+export const hostLevel = (h: HostNums): HostLevel =>
+  diskLow(h) || memLow(h) ? 'critical' : h.diskGB < 5 || h.memPct > 80 ? 'warn' : 'ok'
+/** 멈출 때의 안내 한 줄 */
+export const hostWarning = (h: HostNums): string | undefined => {
+  const d = diskLow(h)
+  const m = memLow(h)
+  if (!d && !m) return undefined
+  const what = d && m ? '디스크 · 메모리' : d ? '디스크' : '메모리'
+  return `${what}가 모자라 셸 명령이 잠시 멈춥니다${m ? ' — 브라우저 탭 · 개발 서버를 줄이면 풀립니다' : ''}`
+}
+/** 잰 값 · host.json 글 → Host. 모양이 틀리거나 디스크를 못 쟀으면 undefined */
+export const parseHost = (s: string): Host | undefined => {
+  try {
+    const j = JSON.parse(s) as Record<string, unknown>
+    const num = (k: string) => (typeof j[k] === 'number' ? (j[k] as number) : undefined)
+    const [diskGB, memPct, memFreeMB, cleanAt] = [num('diskGB'), num('memPct'), num('memFreeMB'), num('cleanAt')]
+    if (diskGB === undefined || diskGB < 0 || memPct === undefined || memFreeMB === undefined) return undefined
+    return { at: num('at') ?? 0, diskGB, memPct, memFreeMB, ...(cleanAt !== undefined ? { cleanAt } : {}) }
+  } catch {
+    return undefined
+  }
+}
+
+export const hhmm = (ms: number) => {
   const d = new Date(ms)
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }

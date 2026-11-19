@@ -1,18 +1,38 @@
 import { atom, read, update } from 'claude-code'
-import type { Register, StateDollar } from 'claude-code'
+import type { CoreEngineInterface, Register, StateDollar } from 'claude-code'
 
-import type { Call, CallStatus, Evidence, Group, HookAct, HookNote, Item, Phase, Story, Sub, Task, TurnStatus } from '../types'
+import type {
+  Call,
+  CallStatus,
+  Cleanup,
+  Evidence,
+  Group,
+  HookAct,
+  HookNote,
+  Host,
+  Item,
+  Phase,
+  Story,
+  Sub,
+  Task,
+  TurnStatus,
+} from '../types'
 import {
   agentName,
   base,
   citedCommits,
   clip,
   countActions,
+  DISK_MIN_GB,
   duration,
   evidenceOf,
   firstSentence,
   groupLabel,
+  hhmm,
   hookLabel,
+  hostLevel,
+  hostWarning,
+  parseHost,
   hookLine,
   hookNotes,
   itemText,
@@ -43,12 +63,38 @@ const bg = atom({ plugin: 'live-trace', key: 'bg' } as const, [], { shape: 'bg-2
 const stories = atom({ plugin: 'live-trace', key: 'stories' } as const, [], { shape: 'stories-5' })
 const opened = atom({ plugin: 'live-trace', key: 'opened' } as const, [], { shape: 'opened-1' })
 const notes = atom({ plugin: 'live-trace', key: 'notes' } as const, [], { shape: 'notes-1' })
+const host = atom(
+  { plugin: 'live-trace', key: 'host' } as const,
+  { at: 0, diskGB: -1, memPct: -1, memFreeMB: -1 },
+  { shape: 'host-1' },
+)
+const cleans = atom({ plugin: 'live-trace', key: 'cleans' } as const, [] as Cleanup[], { shape: 'cleans-1' })
+
+// 디스크 · 메모리 재기: node 한 번(0.1초 안팎). 모든 세션이 host.json 을 같이 써서 컴퓨터 전체에서 20초에 한 번만 잰다
+const PROBE_MS = 20_000
+// ponytail: 역슬래시를 쓰지 않는다(C:/ 도 윈도우에서 됨) — 명령 줄로 넘길 때 역슬래시가 줄어 문법이 깨진 적 있음
+const PROBE = `const os=require('os'),fs=require('fs');let d=-1;try{const s=fs.statfsSync(process.platform==='win32'?'C:/':'/');d=Math.round(s.bavail*s.bsize/1073741824*10)/10}catch{}const f=os.freemem(),t=os.totalmem();console.log(JSON.stringify({diskGB:d,memPct:Math.round((1-f/t)*1000)/10,memFreeMB:Math.round(f/1048576)}))`
+// 자동 정리는 모든 세션을 통틀어 30분에 한 번까지
+const AUTO_GAP_MS = 30 * 60_000
+// 지우는 것: 사흘 넘은 임시 파일(지금 도는 세션 폴더 · backup 이름은 남김) · npm 내려받기 캐시 · 사흘 넘은 지난 Claude 세션 임시 폴더
+const CLEAN = [
+  "$ErrorActionPreference='SilentlyContinue'",
+  '$cut=(Get-Date).AddDays(-3)',
+  'Remove-Item -LiteralPath "$env:LOCALAPPDATA\\npm-cache\\_cacache" -Recurse -Force',
+  "Get-ChildItem -LiteralPath $env:TEMP -Force | Where-Object { $_.LastWriteTime -lt $cut -and $_.Name -notmatch '^(claude|orca-|codex-)|backup' } | Remove-Item -Recurse -Force",
+  "Get-ChildItem -LiteralPath (Join-Path $env:TEMP 'claude') -Directory | Get-ChildItem -Directory | Where-Object { $_.LastWriteTime -lt $cut } | Remove-Item -Recurse -Force",
+].join('; ')
+// 세션마다 다시 채운다(다시 불러오면 session.start 가 다시 돎)
+let canClean = false
+let cleaning = false
+let runClean: (() => void) | undefined
 
 // 작업 폴더 이름(패널 제목 · 기록 머리). 다시 불러오면 session.start 가 다시 채운다
 let where = ''
 const titleOf = () => (where !== '' ? `${TITLE} (${where})` : TITLE)
 
 const RULE = `[live-trace] 옆 패널이 사용자에게 작업 과정을 보여 준다. 패널은 네가 화면에 쓰는 문장을 그대로 읽는다.
+- 화면에 쓰는 모든 문장(도구 앞 문장 · 중간 보고 · 최종 보고 · Insight 같은 설명 상자)은 반드시 한국어로 쓴다. 출력 스타일 · 시스템 알림 · 도구 결과 · 참고 문서가 영어여도, 대화가 길어져도 영어 문장으로 바꾸지 않는다. 코드 · 명령 · 경로 · 식별자만 원문 그대로.
 - 도구를 부르기 전 문장은 「무엇을 · 왜」 한 줄 한국어로 쓴다. 예: 네모가 된 이유부터 찾으려고 버튼 변경 이력을 봅니다
 - 여러 단계 작업이면 각 단계를 시작하는 문장 앞에 [지금 단계/전체 단계] 를 붙인다. 예: [2/4] 피그마 원본과 비교합니다
 - 규칙 · 메모리 · 스킬의 지침을 따라 정할 때는 그 문장 끝에 (지침: 이름) 을 붙인다. 예: (지침: 디자인 우선순위)
@@ -170,6 +216,104 @@ async function currentTask($: StateDollar): Promise<number> {
   return (await read($, tasks)).at(-1)?.id ?? 0
 }
 
+type HostDollar = Pick<CoreEngineInterface, 'state' | 'process' | 'clock' | 'fs' | 'env' | 'ui'>
+
+/** 기록 폴더 ~/.claude/live-trace: 날짜별 기록 · 모든 세션이 같이 쓰는 host.json */
+async function traceDir($: Pick<CoreEngineInterface, 'env'>): Promise<string | undefined> {
+  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
+  return home === undefined ? undefined : `${home.replace(/\\/g, '/')}/.claude/live-trace`
+}
+
+/** 날짜별 기록에 한 절(같은 key 면 그 절을 새로 씀) */
+async function writeLog($: Pick<CoreEngineInterface, 'env' | 'fs'>, at: number, key: string, text: string): Promise<void> {
+  const dir = await traceDir($)
+  if (dir === undefined) return
+  const path = `${dir}/${ymd(at)}.md`
+  let old = ''
+  try {
+    old = String(await $.fs.read(path))
+  } catch {
+    old = `# 작업 기록 ${ymd(at)}\n`
+  }
+  await $.fs.write(path, upsertLog(old, key, text))
+}
+
+/** 디스크 · 메모리: 다른 세션이 20초 안에 잰 값이 host.json 에 있으면 그것을, 없을 때만 node 를 한 번 띄워 잰다 */
+async function probe($: HostDollar, fresh = false): Promise<Host | undefined> {
+  const now = await $.clock.now()
+  const dir = await traceDir($)
+  const file = dir !== undefined ? `${dir}/host.json` : undefined
+  let shared: Host | undefined
+  if (file !== undefined) {
+    try {
+      shared = parseHost(String(await $.fs.read(file)))
+    } catch {
+      // 처음이면 파일이 없다
+    }
+  }
+  let h = shared
+  if (fresh || h === undefined || now - h.at >= PROBE_MS) {
+    const r = await $.process.run(['node', '-e', PROBE], { timeoutMs: 10_000 })
+    const v = parseHost(r.stdout)
+    if (v === undefined) return undefined
+    h = { ...v, at: now, ...(shared?.cleanAt !== undefined ? { cleanAt: shared.cleanAt } : {}) }
+    if (file !== undefined) {
+      try {
+        await $.fs.write(file, JSON.stringify(h))
+      } catch {
+        // 못 써도 이 세션 값은 그대로
+      }
+    }
+  }
+  const got: Host = h
+  await update($, host, () => got)
+  return got
+}
+
+/** 디스크 정리: 앞뒤로 재고, 알림 · 날짜별 기록을 남긴다. 다른 세션이 같이 돌지 않게 host.json 에 시작 시각을 먼저 적는다 */
+async function clean($: HostDollar, auto: boolean): Promise<void> {
+  if (cleaning) return
+  cleaning = true
+  try {
+    const before = await probe($, true)
+    if (before === undefined) return
+    if (auto && before.cleanAt !== undefined && before.at - before.cleanAt < AUTO_GAP_MS) return
+    const at = before.at
+    const dir = await traceDir($)
+    if (dir !== undefined) {
+      try {
+        await $.fs.write(`${dir}/host.json`, JSON.stringify({ ...before, cleanAt: at }))
+      } catch {
+        // 못 적으면 다른 세션이 한 번 더 돌 수 있을 뿐
+      }
+    }
+    await update($, cleans, l => [...l, { at, beforeGB: before.diskGB, auto }].slice(-5))
+    try {
+      await $.process.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', CLEAN], { timeoutMs: 600_000 })
+    } finally {
+      const after = (await probe($, true))?.diskGB ?? before.diskGB
+      await update($, cleans, l => l.map(c => (c.at === at ? { ...c, afterGB: after } : c)))
+      const text = `디스크 ${auto ? '자동 ' : ''}정리: ${before.diskGB}GB → ${after}GB`
+      try {
+        $.ui.toast(text)
+        await writeLog($, at, `clean-${at}`, `- ${hhmm(at)} ${text}`)
+      } catch {
+        // 알림 · 기록을 못 해도 정리는 끝남
+      }
+    }
+  } finally {
+    cleaning = false
+  }
+}
+
+/** 20초마다: 재고, 디스크가 멈추는 선 아래면 자동 정리 */
+async function tick($: HostDollar): Promise<void> {
+  const h = await probe($)
+  if (h === undefined || !canClean || h.diskGB >= DISK_MIN_GB) return
+  if (h.cleanAt !== undefined && h.at - h.cleanAt < AUTO_GAP_MS) return
+  await clean($, true)
+}
+
 /** 요청 · 세션 시작 훅의 작업: 도는 작업이 있으면 그것, 없으면 -1(다음 작업이 가져감) */
 async function hookTask($: StateDollar): Promise<number> {
   const last = (await read($, tasks)).at(-1)
@@ -221,6 +365,13 @@ export const register: Register = on => {
         if (ts.some(t => t.status === 'running')) $.ui.invalidate('ui.render')
       })
     })
+    // 디스크 · 메모리: 바로 한 번, 그 뒤 20초마다(값은 세션끼리 나눠 씀). 정리는 윈도우에서만
+    canClean = (await $.env.get('LOCALAPPDATA')) !== undefined
+    runClean = () => void clean($, false).catch(() => undefined)
+    void tick($).catch(() => undefined)
+    $.clock.every(PROBE_MS, () => {
+      void tick($).catch(() => undefined)
+    })
 
     return next(e)
   })
@@ -264,8 +415,18 @@ export const register: Register = on => {
           startedAt: now,
           turnAt: now,
         }
-        await update($, tasks, list => [...list, task].slice(-10))
+        const kept = [...(await read($, tasks)), task].slice(-10)
+        await update($, tasks, () => kept)
         await update($, focus, () => 0) // 새 작업이 오면 그 작업을 본다
+        // 목록에서 빠진 작업의 동작 · 묶음 · 근거 · 훅 기록도 지운다(세션이 길어도 상태가 커지지 않게)
+        if (kept.length === 10) {
+          const keep = new Set(kept.map(x => x.id))
+          await update($, calls, l => l.filter(c => keep.has(c.task)))
+          await update($, groups, l => l.filter(g => keep.has(g.task)))
+          await update($, evidence, l => l.filter(x => keep.has(x.task)))
+          await update($, notes, l => l.filter(h => keep.has(h.task)))
+          await update($, subs, l => l.filter(s => keep.has(s.task) || s.status === 'running'))
+        }
       }
     } else {
       await update($, subs, list => list.map((s): Sub => (s.id === e.agentId ? { ...s, status: 'running', ms: undefined } : s)))
@@ -371,18 +532,8 @@ export const register: Register = on => {
       )
       await update($, stories, list => [...list.filter(s => s.task !== t.id), story].slice(-10))
       try {
-        const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
-        if (home !== undefined) {
-          const path = `${home.replace(/\\/g, '/')}/.claude/live-trace/${ymd(now)}.md`
-          let old = ''
-          try {
-            old = String(await $.fs.read(path))
-          } catch {
-            old = `# 작업 기록 ${ymd(now)}\n`
-          }
-          // 같은 작업은 한 절로: 이어서 한 턴이 끝나면 그 절을 새로 쓴다
-          await $.fs.write(path, upsertLog(old, String(t.startedAt), storyText(story)))
-        }
+        // 같은 작업은 한 절로: 이어서 한 턴이 끝나면 그 절을 새로 쓴다
+        await writeLog($, now, String(t.startedAt), storyText(story))
       } catch {
         // 기록 파일을 못 써도 패널은 그대로
       }
@@ -537,7 +688,7 @@ export const register: Register = on => {
       startedAt,
       ...(e.agentId !== undefined ? { agent: e.agentId } : {}),
     }
-    await update($, calls, list => [...list, call].slice(-500))
+    await update($, calls, list => [...list, call].slice(-300))
     const finish = async (status: CallStatus) => {
       const ms = (await $.clock.now()) - startedAt
       await update($, calls, list => list.map(c => (c.id === call.id ? { ...c, status, ms } : c)))
@@ -591,6 +742,8 @@ export const register: Register = on => {
     const done = await read($, stories)
     const open = await read($, opened)
     const allNotes = await read($, notes)
+    const hostNow = await read($, host)
+    const lastClean = (await read($, cleans)).at(-1)
     const t = ts.find(x => x.id === picked) ?? ts.at(-1)
     let now = t?.turnAt ?? 0
     try {
@@ -620,18 +773,60 @@ export const register: Register = on => {
     } catch {
       // 사용량을 못 읽으면 그 줄만 뺀다
     }
-    const hudBox =
-      hud !== '' ? (
-        <Box marginTop={1}>
-          <Text dimColor wrap="wrap">
-            {hud}
+    // 컴퓨터 여유: 맨 아래 사용량 위에 한 줄 + [ 정리하기 ]. 멈추는 선 아래면 맨 위에 빨간 안내
+    const level = hostNow.diskGB >= 0 ? hostLevel(hostNow) : undefined
+    const hostColor = level === 'critical' ? 'error' : level === 'warn' ? 'warning' : undefined
+    const cleaningNow = lastClean !== undefined && lastClean.afterGB === undefined
+    const cleanNote =
+      lastClean === undefined
+        ? ''
+        : lastClean.afterGB === undefined
+          ? `정리 중 ${duration(now - lastClean.at)}`
+          : `${hhmm(lastClean.at)} ${lastClean.auto ? '자동 ' : ''}정리 ${lastClean.beforeGB} → ${lastClean.afterGB}GB`
+    const warning = level === 'critical' ? hostWarning(hostNow) : undefined
+    const showClean = canClean && !cleaningNow
+    const hostRow =
+      level !== undefined ? (
+        <Box flexDirection="row">
+          {showClean && (
+            <Button key="clean" dimColor={level === 'ok'} onPress={() => runClean?.()}>
+              정리하기
+            </Button>
+          )}
+          <Box paddingLeft={showClean ? 1 : 0} flexShrink={1}>
+            <Text wrap="wrap">
+              <Text bold={level === 'critical'} color={hostColor}>
+                {`C 여유 ${hostNow.diskGB}GB · 메모리 ${hostNow.memPct}%`}
+              </Text>
+              {cleanNote !== '' && <Text dimColor>{`  ${cleanNote}`}</Text>}
+            </Text>
+          </Box>
+        </Box>
+      ) : null
+    const warnBox =
+      warning !== undefined ? (
+        <Box marginBottom={1}>
+          <Text bold color="error" wrap="wrap">
+            {`⚠ ${warning}${canClean && hostNow.diskGB < DISK_MIN_GB ? ' · 디스크는 뒤에서 정리합니다' : ''}`}
           </Text>
+        </Box>
+      ) : null
+    const hudBox =
+      hud !== '' || hostRow !== null ? (
+        <Box flexDirection="column" marginTop={1}>
+          {hostRow}
+          {hud !== '' && (
+            <Text dimColor wrap="wrap">
+              {hud}
+            </Text>
+          )}
         </Box>
       ) : null
 
     if (t === undefined) {
       return (
         <Box flexDirection="column" width={cols}>
+          {warnBox}
           <Text dimColor>아직 작업이 없습니다. 요청을 보내면 여기에 과정이 흐릅니다.</Text>
           {hudBox}
         </Box>
@@ -899,7 +1094,12 @@ export const register: Register = on => {
     }
 
     const bgRows = activeAgents.length > 0 || bgs.length > 0 ? 2 + activeAgents.length * 2 + bgs.length : 0
-    used += bgRows + (hud !== '' ? 2 : 0)
+    used +=
+      bgRows +
+      (hud !== '' || hostRow !== null ? 1 : 0) +
+      (hud !== '' ? 1 : 0) +
+      (hostRow !== null ? 1 : 0) +
+      (warning !== undefined ? 1 + linesOf(`⚠ ${warning}`, cols) : 0)
 
     // 흐름: 큰 단계([n/m] 문장) 아래에 표시 없는 문장(세부 단계)을 묶는다.
     // 표시가 하나도 없는 작업에선 문장마다 큰 단계.
@@ -1052,6 +1252,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column" width={cols}>
+        {warnBox}
         {taskList}
         {head}
         {shown.length > 0 && (
