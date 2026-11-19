@@ -131,6 +131,8 @@ declare module 'claude-code' {
       notes: Shaped<HookNote[]>
       /** 디스크 · 메모리 여유(마지막으로 읽은 값) */
       host: Shaped<Host>
+      /** 메모리 사용률 최근 12번(20초마다 → 약 4분) */
+      hostHist: Shaped<number[]>
       /** 이 세션에서 한 디스크 정리 */
       cleans: Shaped<Cleanup[]>
     }

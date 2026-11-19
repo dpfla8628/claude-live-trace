@@ -9,7 +9,7 @@
 ![Claude Code mod](https://img.shields.io/badge/Claude_Code-mod-D97757)
 ![tests](https://img.shields.io/badge/tests-25_passing-3fb950)
 ![UI](https://img.shields.io/badge/UI-%ED%95%9C%EA%B5%AD%EC%96%B4-58a6ff)
-![version](https://img.shields.io/badge/version-0.6.1-8b949e)
+![version](https://img.shields.io/badge/version-0.7.0-8b949e)
 
 <img src="assets/panel.svg" alt="live-trace 패널: 작업 중(왼쪽)과 끝난 뒤 작업 설명 카드(오른쪽)" width="100%">
 
@@ -67,6 +67,11 @@ live-trace 는 이 **보이지 않는 과정**을 옆 패널에 실시간으로 
 > **화면 원칙.** 영어 도구 이름 · 명령 원문 · 상태 숫자는 보이지 않습니다.
 > 파일 이름은 나열하지 않고 종류별 개수(`소스 5개`)로 셉니다.
 > 글은 자르지 않고 줄을 바꿉니다. 색은 상태(초록 성공 · 노랑 진행 · 빨강 실패)에만 씁니다.
+>
+> **모양.** 지금 하는 일은 노랑 · 끝난 작업 설명은 초록(중단 · 실패는 빨강) 둥근 테두리 카드.
+> 흐름은 단계마다 왼쪽 상태 색 막대(`▎`)를 세워 타임라인으로, 오래된 단계는 흐리게.
+> 큰 제목(흐름 · 백그라운드 · 판단 근거)은 반전 칩, 단계 줄은 색 칩(` ✓조사 ` ` ▸변경 `), `왜:` 는 흐린 막대를 세운 인용.
+> 메모리 옆에는 최근 4분 흐름 막대(`▃▄▄▅▆`). 블록 글자라 터미널 · 데스크톱 · VS Code 어디서나 보입니다.
 
 <br>
 

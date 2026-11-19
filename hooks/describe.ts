@@ -341,6 +341,11 @@ const memLow = (h: HostNums) => h.memPct > MEM_MAX_PCT || h.memFreeMB < MEM_MIN_
 /** 멈춤(빨강) · 곧 멈춤(노랑: 디스크 5GB 아래 · 메모리 80% 넘음) · 괜찮음 */
 export const hostLevel = (h: HostNums): HostLevel =>
   diskLow(h) || memLow(h) ? 'critical' : h.diskGB < 5 || h.memPct > 80 ? 'warn' : 'ok'
+/** 0~100 값들 → 「▁▃▅█」 같은 한 줄 막대(블록 글자라 어느 화면에서나 보임) */
+const BARS = '▁▂▃▄▅▆▇█'
+export const spark = (values: readonly number[]): string =>
+  values.map(v => BARS[Math.max(0, Math.min(7, Math.floor((v / 100) * 8)))] ?? '').join('')
+
 /** 멈출 때의 안내 한 줄 */
 export const hostWarning = (h: HostNums): string | undefined => {
   const d = diskLow(h)

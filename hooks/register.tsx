@@ -35,6 +35,7 @@ import {
   isEnglish,
   parseHost,
   slipNote,
+  spark,
   hookLine,
   hookNotes,
   itemText,
@@ -71,6 +72,7 @@ const host = atom(
   { shape: 'host-1' },
 )
 const cleans = atom({ plugin: 'live-trace', key: 'cleans' } as const, [] as Cleanup[], { shape: 'cleans-1' })
+const hostHist = atom({ plugin: 'live-trace', key: 'hostHist' } as const, [] as number[], { shape: 'hostHist-1' })
 
 // 디스크 · 메모리 재기: node 한 번(0.1초 안팎). 모든 세션이 host.json 을 같이 써서 컴퓨터 전체에서 20초에 한 번만 잰다
 const PROBE_MS = 20_000
@@ -270,6 +272,8 @@ async function probe($: HostDollar, fresh = false): Promise<Host | undefined> {
     }
   }
   const got: Host = h
+  // 새로 잰 값일 때만 막대에 한 칸(다른 세션이 잰 같은 값을 두 번 넣지 않게)
+  if ((await read($, host)).at !== got.at) await update($, hostHist, l => [...l, got.memPct].slice(-12))
   await update($, host, () => got)
   return got
 }
@@ -754,6 +758,7 @@ export const register: Register = on => {
     const open = await read($, opened)
     const allNotes = await read($, notes)
     const hostNow = await read($, host)
+    const memHist = await read($, hostHist)
     const lastClean = (await read($, cleans)).at(-1)
     const t = ts.find(x => x.id === picked) ?? ts.at(-1)
     let now = t?.turnAt ?? 0
@@ -809,6 +814,7 @@ export const register: Register = on => {
               <Text bold={level === 'critical'} color={hostColor}>
                 {`C 여유 ${hostNow.diskGB}GB · 메모리 ${hostNow.memPct}%`}
               </Text>
+              {memHist.length >= 2 && <Text color={hostColor} dimColor={hostColor === undefined}>{` ${spark(memHist)}`}</Text>}
               {cleanNote !== '' && <Text dimColor>{`  ${cleanNote}`}</Text>}
             </Text>
           </Box>
@@ -855,6 +861,15 @@ export const register: Register = on => {
     )
     const rowLines = (label: string, value: string) => linesOf(`${label} ${value}`, cols)
     const Section = (name: string) => <Text bold>{name}</Text>
+    // 큰 제목(흐름 · 백그라운드 · 판단 근거)은 반전 칩
+    const Chip = (name: string) => <Text bold inverse>{` ${name} `}</Text>
+    // 지금 하는 일 · 작업 설명은 상태 색 둥근 테두리 카드(테두리 2칸 + 안쪽 여백 2칸)
+    const cardW = cols - 4
+    const Card = (color: 'warning' | 'success' | 'error', child: JSX.Element) => (
+      <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1}>
+        {child}
+      </Box>
+    )
     const Indent = (pad: number, child: JSX.Element) => <Box paddingLeft={pad}>{child}</Box>
 
     const callsOf = (id: number) => all.filter(c => c.task === id && c.agent === undefined)
@@ -947,15 +962,20 @@ export const register: Register = on => {
       ? `${runningCall.label} 중  ${duration(now - runningCall.startedAt)}`
       : `다음 할 일 정리 중  ${duration(now - lastTouch)}`
 
+    // 단계 줄: 지나온 단계는 초록 칩, 지금 단계는 노랑 칩, 남은 단계는 흐린 글자
     const phaseRow = (
       <Text>
         {PHASES.map(([p, name]) =>
           isRunning && p === current ? (
-            <Text bold color="warning">{`▸${name}  `}</Text>
+            <Text>
+              <Text bold inverse color="warning">{` ▸${name} `}</Text>{' '}
+            </Text>
           ) : seen.has(p) ? (
-            <Text color="success">{`✓${name}  `}</Text>
+            <Text>
+              <Text inverse color="success">{` ✓${name} `}</Text>{' '}
+            </Text>
           ) : (
-            <Text dimColor>{`◦${name}  `}</Text>
+            <Text dimColor>{` ◦${name}  `}</Text>
           ),
         )}
       </Text>
@@ -977,13 +997,14 @@ export const register: Register = on => {
     const ItemRows = (i: Item) => (
       <Box flexDirection="column">
         <Text wrap="wrap">{itemText(i)}</Text>
-        {i.why !== undefined &&
-          Indent(
-            2,
+        {i.why !== undefined && (
+          // 「왜:」 는 왼쪽에 흐린 막대(▎)를 세운 인용 모양
+          <Box borderStyle="quote" borderDimColor paddingLeft={1}>
             <Text dimColor wrap="wrap">
               왜: {i.why}
-            </Text>,
-          )}
+            </Text>
+          </Box>
+        )}
       </Box>
     )
     const itemLines = (i: Item, width: number) =>
@@ -995,22 +1016,24 @@ export const register: Register = on => {
       // 단계 밖에서 훅이 한 일(요청 · 세션 시작 때 덧붙인 지시)은 위에
       const outer = taskNotes.filter(h => h.group === 0).slice(-3)
       used +=
-        rowLines('지금', nowText) +
+        2 + // 카드 테두리
+        linesOf(`지금 ${nowText}`, cardW) +
         3 +
-        asks.reduce((n, a) => n + rowLines('추가 요청', a), 0) +
-        outer.reduce((n, h) => n + linesOf(`⚑ 훅이 ${hookLabel(h)}`, cols), 0)
-      head = (
+        asks.reduce((n, a) => n + linesOf(`추가 요청 ${a}`, cardW), 0) +
+        outer.reduce((n, h) => n + linesOf(`⚑ 훅이 ${hookLabel(h)}`, cardW), 0)
+      head = Card(
+        'warning',
         <Box flexDirection="column">
           {Row('지금', nowText, { bold: true })}
           {asks.map(a => Row('추가 요청', firstSentence(a)))}
           {outer.map(h => HookRow(h, '훅이 '))}
           <Progress label="진행" value={pct} max={100} valueText={pctText} />
           {phaseRow}
-        </Box>
+        </Box>,
       )
     } else if (story) {
       // 카드: 굵은 제목 아래 한 줄에 하나씩(쉼표로 잇지 않음). 확인한 것은 종류별 개수를 두 칸씩.
-      const inner = cols - 2
+      const inner = cardW - 2
       const requests = [
         firstSentence(story.request) || '(이어서 한 작업)',
         ...(story.asks ?? []).map(a => `작업 중 추가: ${firstSentence(a)}`),
@@ -1032,6 +1055,7 @@ export const register: Register = on => {
           : [{ glyph: '◦', text: '검증할 변경 없음' }]
       const half = Math.floor(inner / 2)
       used +=
+        2 + // 카드 테두리
         3 +
         1 +
         requests.reduce((k, x) => k + linesOf(x, inner), 0) +
@@ -1040,7 +1064,8 @@ export const register: Register = on => {
         (story.sources.length > 0 ? 1 + Math.ceil(story.sources.length / 2) : 0) +
         1 +
         checks.length
-      head = (
+      head = Card(
+        story.status === 'answer' ? 'success' : 'error',
         <Box flexDirection="column">
           <Text>
             <Text bold>{multi ? `${t.id}번 작업 설명` : '작업 설명'}</Text>
@@ -1097,7 +1122,7 @@ export const register: Register = on => {
           )}
           {phaseRow}
           <Text dimColor>/trace 설명 으로 글로 받기</Text>
-        </Box>
+        </Box>,
       )
     } else {
       used += 1
@@ -1194,21 +1219,30 @@ export const register: Register = on => {
         const hasDetail = items.length > 0 || m.subs.length > 0
         const toggle = isOpen ? '▴ 접기' : '▾ 펼치기'
         const summaryText = isLive && summary !== '' ? `지금까지 ${summary}` : summary
+        // 왼쪽 막대(▎ + 한 칸)가 2칸을 쓴다
+        const w = cols - 2
         const need =
-          linesOf(headText, cols) +
-          stepGuides.reduce((n, x) => n + linesOf(`지침 ${x.text}`, cols - 2), 0) +
-          stepHooks.reduce((n, h) => n + linesOf(`⚑ 훅이 ${hookLabel(h)}`, cols - 2), 0) +
-          (latestSub ? linesOf(`↳ ${latestSub.title}`, cols - 2) : 0) +
-          (live ? linesOf(`⊷ ${live.label} 중 00초`, cols - 2) : 0) +
-          (hasDetail || summary !== '' ? linesOf(`[ ${toggle} ] ${summaryText}`, cols - 2) : 0) +
+          linesOf(headText, w) +
+          stepGuides.reduce((n, x) => n + linesOf(`지침 ${x.text}`, w - 2), 0) +
+          stepHooks.reduce((n, h) => n + linesOf(`⚑ 훅이 ${hookLabel(h)}`, w - 2), 0) +
+          (latestSub ? linesOf(`↳ ${latestSub.title}`, w - 2) : 0) +
+          (live ? linesOf(`⊷ ${live.label} 중 00초`, w - 2) : 0) +
+          (hasDetail || summary !== '' ? linesOf(`[ ${toggle} ] ${summaryText}`, w - 2) : 0) +
           shownDetail.length
         if (!isNewest && budget - need < 0) {
           hidden += 1
           return
         }
         budget -= need
+        // 단계마다 왼쪽에 상태 색 막대(▎): 지금 노랑 · 끝남 초록, 오래된 단계는 흐리게 — 이어 붙이면 타임라인
         blocks.unshift(
-          <Box flexDirection="column">
+          <Box
+            flexDirection="column"
+            borderStyle="quote"
+            borderColor={isLive ? 'warning' : 'success'}
+            borderDimColor={!isNewest && !isOpen}
+            paddingLeft={1}
+          >
             <Text wrap="wrap" bold={isNewest} dimColor={!isNewest && !isOpen}>
               <Text color={isLive ? 'warning' : 'success'}>{glyph}</Text> {m.label ? `${m.label} ` : ''}
               {m.lead.title}
@@ -1268,7 +1302,7 @@ export const register: Register = on => {
         {head}
         {shown.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
-            {Section('흐름')}
+            {Chip('흐름')}
             {hidden > 0 && Indent(2, <Text dimColor>이전 단계 {hidden}개</Text>)}
             {blocks}
             {pending > 0 && Indent(2, <Text dimColor>◦ 남은 단계 {pending}개</Text>)}
@@ -1276,7 +1310,7 @@ export const register: Register = on => {
         )}
         {bgRows > 0 && (
           <Box flexDirection="column" marginTop={1}>
-            {Section('백그라운드')}
+            {Chip('백그라운드')}
             {activeAgents.map(s => {
               // 도우미마다 따로: 어느 작업에서 띄웠는지 · 동작 수 · 경과 시간 · 최근 동작
               const acts = all.filter(c => c.agent !== undefined && c.agent === s.id)
@@ -1304,7 +1338,7 @@ export const register: Register = on => {
         )}
         {showBasis && (
           <Box flexDirection="column" marginTop={1}>
-            {Section('판단 근거')}
+            {Chip('판단 근거')}
             {basisNow.map(i => Indent(2, ItemRows(i)))}
           </Box>
         )}

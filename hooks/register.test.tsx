@@ -11,6 +11,7 @@ import {
   isEnglish,
   labelOf,
   parseHost,
+  spark,
   linesOf,
   parseNarration,
   phaseOf,
@@ -594,6 +595,8 @@ test('컴퓨터 여유: 선은 resource-guard 와 같다(디스크 2GB · 메모
   // 디스크를 못 쟀거나(-1) 모양이 틀리면 줄을 띄우지 않는다
   expect(parseHost('{"diskGB":-1,"memPct":1,"memFreeMB":1}')).toBe(undefined)
   expect(parseHost('x')).toBe(undefined)
+  // 메모리 흐름 막대: 0 → ▁, 50 → ▅, 100 → █
+  expect(spark([0, 50, 100])).toBe('▁▅█')
   expect(parseHost('{"diskGB":3.7,"memPct":61.5,"memFreeMB":9000}')).toEqual({ at: 0, diskGB: 3.7, memPct: 61.5, memFreeMB: 9000 })
 })
 
@@ -625,7 +628,7 @@ test('컴퓨터 여유: 디스크가 2GB 아래면 뒤에서 정리하고 알리
   expect(toasts).toEqual(['디스크 자동 정리: 1.5GB → 3.1GB'])
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /^C 여유/ }))?.text).toMatch(
-    /^C 여유 3\.1GB · 메모리 61\.5% {2}\d\d:\d\d 자동 정리 1\.5 → 3\.1GB$/,
+    /^C 여유 3\.1GB · 메모리 61\.5% ▅▅▅ {2}\d\d:\d\d 자동 정리 1\.5 → 3\.1GB$/,
   )
   expect(await ui.find({ type: 'Text', text: /^⚠/ })).toBe(undefined)
   // 손으로 누르면 30분 안이어도 돈다
