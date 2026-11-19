@@ -32,7 +32,9 @@ import {
   hookLabel,
   hostLevel,
   hostWarning,
+  isEnglish,
   parseHost,
+  slipNote,
   hookLine,
   hookNotes,
   itemText,
@@ -88,6 +90,8 @@ const CLEAN = [
 let canClean = false
 let cleaning = false
 let runClean: (() => void) | undefined
+// 마지막 도구 앞 문장이 영어였으면 그 문장(다음 도구 결과에 안내를 한 번 붙이고 비움)
+let englishSlip = ''
 
 // 작업 폴더 이름(패널 제목 · 기록 머리). 다시 불러오면 session.start 가 다시 채운다
 let where = ''
@@ -465,6 +469,8 @@ export const register: Register = on => {
       if (c.kind !== 'tool') continue
       const said = parseNarration(text)
       text = ''
+      // 영어로 쓴 문장은 이 도구 결과에 「한국어로」 안내를 붙여 바로 바로잡게 한다(classic.PostToolUse)
+      if (isEnglish(said.title)) englishSlip = said.title
       try {
         const task = await currentTask($)
         let made: Group | undefined
@@ -621,6 +627,11 @@ export const register: Register = on => {
       })
     } catch {
       // 관찰 전용
+    }
+    if (englishSlip !== '') {
+      const said = englishSlip
+      englishSlip = ''
+      return { ...r, additionalContext: [...(r.additionalContext ?? []), slipNote(said)] }
     }
 
     return r

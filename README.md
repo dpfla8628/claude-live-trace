@@ -7,9 +7,9 @@
 끝난 작업은 「이 상황에서 이 스킬을 쓰고, 이 지침을 따라, 이렇게 했다」는 설명 카드로 남습니다.
 
 ![Claude Code mod](https://img.shields.io/badge/Claude_Code-mod-D97757)
-![tests](https://img.shields.io/badge/tests-24_passing-3fb950)
+![tests](https://img.shields.io/badge/tests-25_passing-3fb950)
 ![UI](https://img.shields.io/badge/UI-%ED%95%9C%EA%B5%AD%EC%96%B4-58a6ff)
-![version](https://img.shields.io/badge/version-0.6.0-8b949e)
+![version](https://img.shields.io/badge/version-0.6.1-8b949e)
 
 <img src="assets/panel.svg" alt="live-trace 패널: 작업 중(왼쪽)과 끝난 뒤 작업 설명 카드(오른쪽)" width="100%">
 
@@ -312,6 +312,7 @@ Claude Code **mod** (플러그인 + hooks 모듈) 하나입니다. 따로 도는
 
 `prompt.compose` 로 시스템 프롬프트에 들어갑니다. 패널이 읽기 좋은 문장을 Claude 가 쓰게 합니다.
 
+- 화면에 쓰는 **모든 문장은 한국어** — 출력 스타일 · 시스템 안내가 영어여도. 그래도 영어로 쓴 도구 앞 문장은 패널이 알아채 그 도구 결과에 「다음 문장부터 반드시 한국어로」 안내를 붙여 바로잡습니다 (`README.md 를 봅니다` 처럼 파일 이름만 영어인 문장은 해당 없음)
 - 도구를 부르기 전 **「무엇을 · 왜」 한 줄 한국어** — `네모가 된 이유부터 찾으려고 버튼 변경 이력을 봅니다`
 - 여러 단계 작업이면 **`[지금/전체]`** — `[2/4] 피그마 원본과 비교합니다`
 - 지침을 따를 때 **`(지침: 이름)`** — `(지침: 디자인 우선순위)`

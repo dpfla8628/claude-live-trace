@@ -8,6 +8,7 @@ import {
   hookLine,
   hostLevel,
   hostWarning,
+  isEnglish,
   labelOf,
   parseHost,
   linesOf,
@@ -651,6 +652,32 @@ test('컴퓨터 여유: 메모리가 모자라면 맨 위에 빨간 안내(정�
   )
   expect(ran).toEqual(['node'])
   await ui.unmount()
+})
+
+test('도구 앞 문장을 영어로 쓰면 그 도구 결과에 「한국어로」 안내를 한 번 붙인다', async ($, on) => {
+  engine(on)
+  let reply = say("I'll check whether it's live by looking for a file.", 'u1', 'Bash')
+  on('turn.step', async function* () {
+    return yield* reply()
+  })
+  on('tool.call', () => ({ result: {}, text: '' }))
+  on('classic.PostToolUse', () => ({}))
+  const post = (id: string) =>
+    $.classic.PostToolUse({ tool_name: 'Bash', tool_input: {}, tool_response: {}, tool_use_id: id } as never)
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: '확인해줘', turnId: 't1' })
+  await drain($.turn.step({ turnId: 't1', index: 0, model: 'opus', messageCount: 1 }))
+  expect((await post('u1')).additionalContext?.at(-1)).toContain('다음 문장부터 반드시 한국어로 쓴다')
+  // 한 번만
+  expect((await post('u1')).additionalContext).toBe(undefined)
+  // 한국어 문장 · 파일 이름만 영어인 문장은 붙이지 않는다
+  reply = say('README.md 를 봅니다', 'u2', 'Bash', 1)
+  await drain($.turn.step({ turnId: 't1', index: 1, model: 'opus', messageCount: 2 }))
+  expect((await post('u2')).additionalContext).toBe(undefined)
+  expect(isEnglish('Now the tests.')).toBe(true)
+  expect(isEnglish('Now I run the tests and the type check together.')).toBe(true)
+  expect(isEnglish('uv cache clean 을 돌립니다')).toBe(false)
 })
 
 test('아무 일도 없을 때 안내 문구', async $ => {

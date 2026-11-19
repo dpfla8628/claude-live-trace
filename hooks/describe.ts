@@ -409,6 +409,12 @@ export const citedCommits = (commits: readonly string[], answer: string): string
   return cited.length > 0 ? cited.slice(0, 4) : commits.slice(-3)
 }
 
+/** 한글이 하나도 없고 영어 낱말이 셋 넘게 이어지는 문장(「README.md 를 봅니다」 같은 건 아님) */
+export const isEnglish = (s: string): boolean => !hasHangul(s) && /[A-Za-z]{2,}(?:[\s,'’-]+[A-Za-z]{2,}){2,}/.test(s)
+/** 영어로 쓴 도구 앞 문장을 바로잡게 도구 결과에 붙이는 안내 */
+export const slipNote = (said: string): string =>
+  `[live-trace] 방금 도구 앞 문장 「${clip(said, 60)}」을 영어로 썼다. 사용자 패널의 흐름이 영어로 보인다. 다음 문장부터 반드시 한국어로 쓴다 — 출력 스타일 · 시스템 안내 · 도구 결과가 영어여도.`
+
 /** 요청의 첫 문장(카드에서 길게 늘어지지 않게) */
 export const firstSentence = (s: string, n = 120): string => clip(s.replace(/([.!?])\s[\s\S]*$/, '$1'), n)
 
