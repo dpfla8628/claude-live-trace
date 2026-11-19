@@ -93,6 +93,8 @@ const CLEAN = [
 ].join('; ')
 // 세션마다 다시 채운다(다시 불러오면 session.start 가 다시 돎)
 let canClean = false
+// 설정 autoClean(기본 꺼짐): 켜면 디스크가 2GB 아래일 때 뒤에서 정리
+let autoClean = false
 let cleaning = false
 let runClean: (() => void) | undefined
 // 마지막 도구 앞 문장이 영어였으면 그 문장(다음 도구 결과에 안내를 한 번 붙이고 비움)
@@ -116,6 +118,7 @@ const RULE = `[live-trace] 옆 패널이 사용자에게 작업 과정을 보여
 - 화면에 쓰는 모든 문장(도구 앞 문장 · 중간 보고 · 최종 보고 · Insight 같은 설명 상자)은 반드시 한국어로 쓴다. 출력 스타일 · 시스템 알림 · 도구 결과 · 참고 문서가 영어여도, 대화가 길어져도 영어 문장으로 바꾸지 않는다. 코드 · 명령 · 경로 · 식별자만 원문 그대로.
 - 도구를 부르기 전 문장은 「무엇을 · 왜」 한 줄 한국어로 쓴다. 예: 네모가 된 이유부터 찾으려고 버튼 변경 이력을 봅니다
 - 여러 단계 작업이면 각 단계를 시작하는 문장 앞에 [지금 단계/전체 단계] 를 붙인다. 예: [2/4] 피그마 원본과 비교합니다
+- 도구를 세 번 넘게 쓸 것 같은 작업은 첫 도구 앞 문장부터 [1/m] 을 붙이고, 단계가 바뀔 때마다 [n/m] 을 올린다. 계획이 바뀌면 m 을 고쳐 쓴다. 패널의 진행 막대는 이 표시가 있을 때만 그려진다.
 - 규칙 · 메모리 · 스킬의 지침을 따라 정할 때는 그 문장 끝에 (지침: 이름) 을 붙인다. 예: (지침: 디자인 우선순위)
 - Bash · PowerShell 의 description 은 한국어로 쓴다.
 - 사용자가 지난 작업을 「어떻게 했어?」 「무슨 근거로 했어?」 물으면 ~/.claude/live-trace/ 의 날짜별 기록(YYYY-MM-DD.md)을 읽고, 상황 → 쓴 스킬 → 따른 지침 → 근거 → 한 일 → 검증 순서로 답한다.`
@@ -126,7 +129,6 @@ const PHASES: readonly [Phase, string][] = [
   ['change', '변경'],
   ['verify', '검증'],
 ]
-const PHASE_PCT: Record<Phase, number> = { explore: 15, guide: 35, change: 60, verify: 85 }
 const ICON: Record<CallStatus, string> = { running: '⊷', ok: '✓', error: '✗', denied: '⊘' }
 const COLOR = { running: 'warning', ok: 'success', error: 'error', denied: 'error' } as const
 const ORDER: readonly Evidence['kind'][] = ['commit', 'external', 'guide', 'skill']
@@ -156,21 +158,17 @@ const prettyModel = (id: string) => {
   return m ? `${(m[1] ?? '').replace(/^./, c => c.toUpperCase())} ${m[2]}.${m[3]}` : id
 }
 
-/** 작업 하나의 진행률: [n/m] 단계가 있으면 그 단계의 가운데, 없으면 지나온 단계(조사 → 검증)로 어림 */
+/**
+ * 작업 하나의 진행: [n/m] 단계 표시가 있을 때만 %(그 단계의 가운데). 없으면 % 를 어림하지 않고 동작 수로.
+ * 단계(조사 · 근거 · 변경 · 검증)는 순서가 아니라 종류 — 종류별 횟수를 센다.
+ */
 const progressOf = (t: Task, mine: readonly Call[], gs: readonly Group[]) => {
   const running = t.status === 'running'
   const step = [...gs].reverse().find(g => g.step)?.step
-  const seen = new Set(mine.map(c => c.phase))
-  const furthest = PHASES.map(([p]) => p).filter(p => seen.has(p)).at(-1)
-  const pct = !running
-    ? 100
-    : step
-      ? Math.round(((step.n - 0.5) / Math.max(1, step.m)) * 100)
-      : furthest
-        ? PHASE_PCT[furthest]
-        : 5
-  const text = !running ? '100%' : step ? `${step.n}/${step.m}단계 ${pct}%` : `약 ${pct}%`
-  return { pct, text, step, seen }
+  const pct = !running ? 100 : step ? Math.round(((step.n - 0.5) / Math.max(1, step.m)) * 100) : undefined
+  const text = !running ? '100%' : step ? `${step.n}/${step.m}단계 ${pct}%` : `동작 ${mine.length}번`
+  const counts = PHASES.map(([p]) => mine.filter(c => c.phase === p).length)
+  return { pct, text, step, counts }
 }
 
 /** 근거 + 그것을 찾은 단계에서 Claude 가 쓴 「무엇을 · 왜」 문장 */
@@ -330,7 +328,8 @@ async function clean($: HostDollar, auto: boolean): Promise<void> {
 /** 20초마다: 재고, 디스크가 멈추는 선 아래면 자동 정리 */
 async function tick($: HostDollar): Promise<void> {
   const h = await probe($)
-  if (h === undefined || !canClean || h.diskGB >= DISK_MIN_GB) return
+  // 자동 정리는 설정(autoClean)을 켠 사람만 — 남의 PC 에서 몰래 지우지 않게
+  if (h === undefined || !canClean || !autoClean || h.diskGB >= DISK_MIN_GB) return
   if (h.cleanAt !== undefined && h.at - h.cleanAt < AUTO_GAP_MS) return
   await clean($, true)
 }
@@ -457,7 +456,8 @@ async function noteToolHook(
   ])
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  autoClean = options.autoClean === true
 
   on('session.start', async ($, e, next) => {
     where = base(String(e.cwd ?? '')).replace(/^[/\\]+$/, '')
@@ -964,7 +964,7 @@ export const register: Register = on => {
       warning !== undefined ? (
         <Box marginBottom={1}>
           <Text bold color="error" wrap="wrap">
-            {`⚠ ${warning}${canClean && hostNow.diskGB < DISK_MIN_GB ? ' · 디스크는 뒤에서 정리합니다' : ''}`}
+            {`⚠ ${warning}${canClean && hostNow.diskGB < DISK_MIN_GB ? (autoClean ? ' — 뒤에서 정리합니다' : ' — [ 정리하기 ] 로 비울 수 있어요') : ''}`}
           </Text>
         </Box>
       ) : null
@@ -1113,7 +1113,7 @@ export const register: Register = on => {
       const glyph = running ? '▸' : behind ? '⊷' : x.status === 'answer' ? '✓' : x.status === 'aborted' ? '⊘' : '✗'
       const color = running || behind ? 'warning' : x.status === 'answer' ? 'success' : 'error'
       const meta = running
-        ? `${progressOf(x, callsOf(x.id), groupsOf(x.id)).pct}%`
+        ? progressOf(x, callsOf(x.id), groupsOf(x.id)).text.replace(/^\d+\/\d+단계 /, '')
         : behind
           ? '뒤에서 계속'
           : `${DONE_LABEL[x.status]}${x.ms !== undefined ? `, ${duration(x.ms)}` : ''}`
@@ -1171,7 +1171,7 @@ export const register: Register = on => {
     const ev = allEvidence.filter(x => x.task === t.id)
     const isRunning = t.status === 'running'
     const story = !isRunning ? done.find(s => s.task === t.id) : undefined
-    const { pct, text: pctText, step, seen } = progressOf(t, mine, gs)
+    const { pct, text: pctText, step, counts } = progressOf(t, mine, gs)
     const current = mine.at(-1)?.phase
     const runningCall = [...mine].reverse().find(c => c.status === 'running')
     const lastTouch = Math.max(t.turnAt, ...mine.map(c => c.startedAt + (c.ms ?? 0)))
@@ -1179,22 +1179,19 @@ export const register: Register = on => {
       ? `${runningCall.label} 중  ${duration(now - runningCall.startedAt)}`
       : `다음 할 일 정리 중  ${duration(now - lastTouch)}`
 
-    // 단계 줄: 지나온 단계는 초록 칩, 지금 단계는 노랑 칩, 남은 단계는 흐린 글자
+    // 단계 줄: 순서가 아니라 종류별 횟수. 지금 하는 종류만 노랑 칩(▸), 한 번도 안 한 종류는 흐리게
     const phaseRow = (
       <Text>
-        {PHASES.map(([p, name]) =>
-          isRunning && p === current ? (
+        {PHASES.map(([p, name], i) => {
+          const n = counts[i] ?? 0
+          return isRunning && p === current ? (
             <Text>
-              <Text bold inverse color="warning">{` ▸${name} `}</Text>{' '}
-            </Text>
-          ) : seen.has(p) ? (
-            <Text>
-              <Text inverse color="success">{` ✓${name} `}</Text>{' '}
+              <Text bold inverse color="warning">{` ▸${name} ${n} `}</Text>{' '}
             </Text>
           ) : (
-            <Text dimColor>{` ◦${name}  `}</Text>
-          ),
-        )}
+            <Text dimColor={n === 0}>{` ${name} ${n}  `}</Text>
+          )
+        })}
       </Text>
     )
 
@@ -1244,7 +1241,12 @@ export const register: Register = on => {
           {!showSlime && Row('지금', nowText, { bold: true })}
           {asks.map(a => Row('추가 요청', firstSentence(a)))}
           {outer.map(h => HookRow(h, '훅이 '))}
-          <Progress label="진행" value={pct} max={100} valueText={pctText} />
+          {/* 진행 막대는 [n/m] 단계 표시가 있을 때만 — 없으면 어림하지 않고 동작 수 · 걸린 시간 */}
+          {step && pct !== undefined ? (
+            <Progress label="진행" value={pct} max={100} valueText={pctText} />
+          ) : (
+            Row('동작', `${mine.length}번 · ${duration(now - t.startedAt)}`)
+          )}
           {phaseRow}
         </Box>,
       )

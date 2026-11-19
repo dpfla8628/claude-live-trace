@@ -601,7 +601,7 @@ test('컴퓨터 여유: 선은 resource-guard 와 같다(디스크 2GB · 메모
   expect(hostLevel({ diskGB: 20, memPct: 50, memFreeMB: 1500 })).toBe('critical')
   expect(hostLevel({ diskGB: 3, memPct: 50, memFreeMB: 9000 })).toBe('warn')
   expect(hostLevel({ diskGB: 20, memPct: 50, memFreeMB: 9000 })).toBe('ok')
-  expect(hostWarning({ diskGB: 1, memPct: 50, memFreeMB: 9000 })).toBe('디스크가 모자라 셸 명령이 잠시 멈춥니다')
+  expect(hostWarning({ diskGB: 1, memPct: 50, memFreeMB: 9000 })).toBe('디스크가 모자랍니다(2GB 아래)')
   expect(hostWarning({ diskGB: 20, memPct: 50, memFreeMB: 9000 })).toBe(undefined)
   // 디스크를 못 쟀거나(-1) 모양이 틀리면 줄을 띄우지 않는다
   expect(parseHost('{"diskGB":-1,"memPct":1,"memFreeMB":1}')).toBe(undefined)
@@ -611,7 +611,25 @@ test('컴퓨터 여유: 선은 resource-guard 와 같다(디스크 2GB · 메모
   expect(parseHost('{"diskGB":3.7,"memPct":61.5,"memFreeMB":9000}')).toEqual({ at: 0, diskGB: 3.7, memPct: 61.5, memFreeMB: 9000 })
 })
 
-test('컴퓨터 여유: 디스크가 2GB 아래면 뒤에서 정리하고 알리며, [ 정리하기 ] 로도 돌린다', async ($, on) => {
+test('자동 정리는 기본으로 꺼져 있다: 디스크가 2GB 아래여도 재기만 하고 지우지 않는다(다른 사람 PC 에서 몰래 지우지 않게)', async ($, on) => {
+  const ran: string[] = []
+  engine(on, {
+    env: { LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local' },
+    run: argv => {
+      ran.push(String(argv[0]))
+      return { exitCode: 0, stdout: JSON.stringify({ diskGB: 1.5, memPct: 50, memFreeMB: 9000 }), stderr: '' }
+    },
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  for (let i = 0; i < 200_000 && ran.length === 0; i++) await Promise.resolve()
+  for (let i = 0; i < 5_000; i++) await Promise.resolve()
+  expect(ran).toEqual(['node'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /^⚠/ }))?.text).toBe('⚠ 디스크가 모자랍니다(2GB 아래) — [ 정리하기 ] 로 비울 수 있어요')
+  await ui.unmount()
+})
+
+test('컴퓨터 여유: 자동 정리를 켜면 디스크가 2GB 아래일 때 뒤에서 정리하고 알리며, [ 정리하기 ] 로도 돌린다', { options: { autoClean: true } }, async ($, on) => {
   const disks = [1.5, 1.5, 3.1, 3.1, 3.1, 4.2]
   const ran: string[] = []
   const toasts: string[] = []
@@ -662,7 +680,7 @@ test('컴퓨터 여유: 메모리가 모자라면 맨 위에 빨간 안내(정�
   for (let i = 0; i < 2_000; i++) await Promise.resolve()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /^⚠/ }))?.text).toBe(
-    '⚠ 메모리가 모자라 셸 명령이 잠시 멈춥니다 — 브라우저 탭 · 개발 서버를 줄이면 풀립니다',
+    '⚠ 메모리가 모자랍니다(90% 넘음 · 가용 2GB 아래) — 브라우저 탭 · 개발 서버를 줄여 보세요',
   )
   expect(ran).toEqual(['node'])
   await ui.unmount()
@@ -874,6 +892,28 @@ test('그릴 때 시계 쪽 슬라임 상태를 화면과 맞춘다: 훅 막음 
   await fire(timers, second)
   await fire(timers, slimeTick)
   expect(lastCells).toBe(toCells(slimeFrame('think', 1)))
+  await ui.unmount()
+})
+
+test('단계 칩은 종류별 횟수 + 지금 종류(▸)만 강조, 단계 표시가 없으면 어림 % 대신 「동작 n번 · 시간」', async ($, on) => {
+  engine(on)
+  on('tool.call', () => ({ result: {}, text: '' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: '살펴봐', turnId: 't1' })
+  await $.tool.call({ tool: 'Grep', pattern: 'a', tool_use_id: 'u1' } as never)
+  await $.tool.call({ tool: 'Grep', pattern: 'b', tool_use_id: 'u2' } as never)
+  await $.tool.call({ tool: 'Edit', file_path: '/r/a.ts', old_string: 'a', new_string: 'b', tool_use_id: 'u3' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'npm test', description: '테스트', tool_use_id: 'u4' } as never)
+  // 검증 뒤 다시 조사로 돌아감 — 순서가 아니라 종류별 횟수라 뒤죽박죽이 아님
+  await $.tool.call({ tool: 'Grep', pattern: 'c', tool_use_id: 'u5' } as never)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /^ ▸조사 \d+ $/ }))?.text).toBe(' ▸조사 3 ')
+  expect((await ui.find({ type: 'Text', text: /^ 근거/ }))?.text).toBe(' 근거 0  ')
+  expect((await ui.find({ type: 'Text', text: /^ 변경/ }))?.text).toBe(' 변경 1  ')
+  expect((await ui.find({ type: 'Text', text: /^ 검증/ }))?.text).toBe(' 검증 1  ')
+  expect((await ui.find({ type: 'Text', text: /^동작 / }))?.text).toMatch(/^동작 5번 · \d+초$/)
+  expect(await ui.find({ text: /약 \d+%/ })).toBe(undefined)
   await ui.unmount()
 })
 

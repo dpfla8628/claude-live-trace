@@ -346,13 +346,14 @@ const BARS = '▁▂▃▄▅▆▇█'
 export const spark = (values: readonly number[]): string =>
   values.map(v => BARS[Math.max(0, Math.min(7, Math.floor((v / 100) * 8)))] ?? '').join('')
 
-/** 멈출 때의 안내 한 줄 */
+/** 모자랄 때의 안내 한 줄(어느 PC 에서나 맞는 말로 — 명령이 멈추는지는 그 PC 의 설정에 달림) */
 export const hostWarning = (h: HostNums): string | undefined => {
   const d = diskLow(h)
   const m = memLow(h)
   if (!d && !m) return undefined
-  const what = d && m ? '디스크 · 메모리' : d ? '디스크' : '메모리'
-  return `${what}가 모자라 셸 명령이 잠시 멈춥니다${m ? ' — 브라우저 탭 · 개발 서버를 줄이면 풀립니다' : ''}`
+  const what = [d ? '디스크' : '', m ? '메모리' : ''].filter(Boolean).join(' · ')
+  const why = [d ? '2GB 아래' : '', m ? '90% 넘음 · 가용 2GB 아래' : ''].filter(Boolean).join(' · ')
+  return `${what}가 모자랍니다(${why})${m ? ' — 브라우저 탭 · 개발 서버를 줄여 보세요' : ''}`
 }
 /** 잰 값 · host.json 글 → Host. 모양이 틀리거나 디스크를 못 쟀으면 undefined */
 export const parseHost = (s: string): Host | undefined => {
