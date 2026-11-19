@@ -420,6 +420,18 @@ export const isEnglish = (s: string): boolean => !hasHangul(s) && /[A-Za-z]{2,}(
 export const slipNote = (said: string): string =>
   `[live-trace] 방금 도구 앞 문장 「${clip(said, 60)}」을 영어로 썼다. 사용자 패널의 흐름이 영어로 보인다. 다음 문장부터 반드시 한국어로 쓴다 — 출력 스타일 · 시스템 안내 · 도구 결과가 영어여도.`
 
+/** 끝난 답이 사용자에게 묻는 말로 끝났나: 코드 묶음 밖 마지막 글 줄이 ? · 「까요」 · 「주세요」로 끝나면 */
+export const asksUser = (answer: string): boolean => {
+  const last =
+    answer
+      .replace(/```[\s\S]*?```/g, '')
+      .split('\n')
+      .map(l => l.replace(/^[\s>*_#-]+|[\s*_`]+$/g, ''))
+      .filter(Boolean)
+      .at(-1) ?? ''
+  return /[?？]$/.test(last) || /(까요|주세요|할지|될지)[.!]?$/.test(last)
+}
+
 /** 요청의 첫 문장(카드에서 길게 늘어지지 않게) */
 export const firstSentence = (s: string, n = 120): string => clip(s.replace(/([.!?])\s[\s\S]*$/, '$1'), n)
 

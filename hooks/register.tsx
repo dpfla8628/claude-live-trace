@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { CoreEngineInterface, Register, StateDollar } from 'claude-code'
+import type { CoreEngineInterface, RasterProps, Register, StateDollar, SvgProps } from 'claude-code'
 
 import type {
   Call,
@@ -19,6 +19,7 @@ import type {
 } from '../types'
 import {
   agentName,
+  asksUser,
   base,
   citedCommits,
   clip,
@@ -51,6 +52,8 @@ import {
   upsertLog,
   ymd,
 } from './describe'
+import { SLIME_SPEC, miniFrame, miniLabel, pickMini, pickState, slimeFrame, toCells, toSvg } from './slime'
+import type { SlimeState } from './slime'
 
 const PANE = 'live-trace'
 const TITLE = '작업 과정'
@@ -94,6 +97,16 @@ let cleaning = false
 let runClean: (() => void) | undefined
 // 마지막 도구 앞 문장이 영어였으면 그 문장(다음 도구 결과에 안내를 한 번 붙이고 비움)
 let englishSlip = ''
+// 젤리 슬라임: 상태는 사건 · 그릴 때 정하고, 시계(flipSlime)는 상태별 간격마다 장만 넘겨 격자 칸만 갈아 끼운다
+let characterOn = true
+let rasterDrawn = false
+let lastBlockAt: number | undefined
+let slime: { state: SlimeState; frame: number; endedAt: number | undefined; minis: SlimeState[] } = {
+  state: 'rest',
+  frame: 0,
+  endedAt: undefined,
+  minis: [],
+}
 
 // 작업 폴더 이름(패널 제목 · 기록 머리). 다시 불러오면 session.start 가 다시 채운다
 let where = ''
@@ -322,6 +335,90 @@ async function tick($: HostDollar): Promise<void> {
   await clean($, true)
 }
 
+/** 슬라임이 보여 줄 것: 가장 최근 작업 기준 상태 + 도우미 꼬마(셋까지) — 화면과 시계가 같은 계산을 쓴다 */
+const slimeView = (ts: readonly Task[], all: readonly Call[], agents: readonly Sub[], now: number) => {
+  const t = ts.at(-1)
+  const running =
+    t === undefined ? undefined : [...all].reverse().find(c => c.task === t.id && c.agent === undefined && c.status === 'running')
+  const state = pickState({
+    now,
+    ...(t !== undefined ? { task: t } : {}),
+    ...(running !== undefined ? { running } : {}),
+    ...(lastBlockAt !== undefined ? { blockedAt: lastBlockAt } : {}),
+  })
+  const minis = agents.flatMap(s => {
+    const last = s.id === undefined ? undefined : [...all].reverse().find(c => c.agent === s.id)
+    const st = pickMini({
+      status: s.status,
+      startedAt: s.startedAt,
+      now,
+      ...(s.ms !== undefined ? { ms: s.ms } : {}),
+      ...(last !== undefined ? { phase: last.phase } : {}),
+    })
+    return st === undefined ? [] : [{ state: st, label: miniLabel(s.type, st) }]
+  })
+  return { state, endedAt: t?.endedAt, minis: minis.slice(0, 3), more: Math.max(0, minis.length - 3) }
+}
+
+/** 사건(도구 시작 · 끝, 턴 시작 · 끝, 도우미, 훅 막음) 때 슬라임 상태를 다시 정한다 */
+async function refreshSlime($: Pick<CoreEngineInterface, 'state' | 'clock'>): Promise<void> {
+  const v = slimeView(await read($, tasks), await read($, calls), await read($, subs), await $.clock.now())
+  slime = {
+    ...slime,
+    ...(v.state !== slime.state ? { state: v.state, frame: 0 } : {}),
+    endedAt: v.endedAt,
+    minis: v.minis.map(m => m.state),
+  }
+}
+
+type SlimeDollar = Pick<CoreEngineInterface, 'state' | 'clock' | 'ui'>
+// 슬라임 시계가 걸려 있나(엔진 규칙상 $ 는 변수에 담을 수 없어 1초 시계가 다시 건다)
+let slimeTimerOn = false
+
+/**
+ * 다음 장 하나: 장 번호를 올리고 격자 칸만 갈아 끼운다(패널을 다시 그리지 않음).
+ * 안 그려졌거나 갈아 끼우기가 거절되면(패널을 닫음 · 가려짐) false — 시계를 멈추고, 다시 그려질 때 이어 간다.
+ */
+export async function flipSlime($: SlimeDollar): Promise<boolean> {
+  if (!characterOn || !rasterDrawn) return false
+  // 끝난 지 5분 → 쉬는 중(시각은 이때만 읽음)
+  if (slime.state === 'done' && slime.endedAt !== undefined && (await $.clock.now()) - slime.endedAt >= 5 * 60_000) {
+    await refreshSlime($)
+  }
+  // ponytail: 12 는 장 수(2 · 3 · 4 · 6)의 공배수 — 숫자가 끝없이 커지지 않게
+  slime.frame = (slime.frame + 1) % 12
+  const frames: [string, string][] = [
+    ['slime', toCells(slimeFrame(slime.state, slime.frame))],
+    ...slime.minis.map((m, i): [string, string] => [`mini-${i}`, toCells(miniFrame(m, slime.frame))]),
+  ]
+  for (const [key, cells] of frames) {
+    const r = await $.ui.blit({ requestId: PANE, key, cells }).catch(() => ({ deny: '보내지 못함' }))
+    if ('deny' in r && r.deny !== undefined) {
+      rasterDrawn = false
+      return false
+    }
+  }
+  return true
+}
+
+/** 시계가 안 돌고 있으면 건다: 지금 상태의 간격 뒤 한 장 넘기고, 이어 갈 수 있으면 다시 건다(0.2초마다 깨지 않음) */
+function kickSlime($: SlimeDollar): void {
+  if (slimeTimerOn || !characterOn || !rasterDrawn) return
+  slimeTimerOn = true
+  try {
+    $.clock.after(SLIME_SPEC[slime.state].ms, () => {
+      void flipSlime($)
+        .catch(() => false)
+        .then(go => {
+          slimeTimerOn = false
+          if (go) kickSlime($)
+        })
+    })
+  } catch {
+    slimeTimerOn = false
+  }
+}
+
 /** 요청 · 세션 시작 훅의 작업: 도는 작업이 있으면 그것, 없으면 -1(다음 작업이 가져감) */
 async function hookTask($: StateDollar): Promise<number> {
   const last = (await read($, tasks)).at(-1)
@@ -372,6 +469,8 @@ export const register: Register = on => {
       void read($, tasks).then(ts => {
         if (ts.some(t => t.status === 'running')) $.ui.invalidate('ui.render')
       })
+      // 슬라임 시계가 멈춰 있고(패널을 닫았다 열었음 · 다시 불러옴) 패널이 그려져 있으면 다시 건다
+      kickSlime($)
     })
     // 디스크 · 메모리: 바로 한 번, 그 뒤 20초마다(값은 세션끼리 나눠 씀). 정리는 윈도우에서만
     canClean = (await $.env.get('LOCALAPPDATA')) !== undefined
@@ -380,6 +479,17 @@ export const register: Register = on => {
     $.clock.every(PROBE_MS, () => {
       void tick($).catch(() => undefined)
     })
+    // 젤리 슬라임: 끄고 켠 설정은 세션이 바뀌어도 남는다(/trace 캐릭터)
+    try {
+      characterOn = (await $.store.get('character')) !== 'off'
+    } catch {
+      characterOn = true
+    }
+    // 다시 불러오면 시계가 멈추므로 새로 건다 — 화면이 그려지면 아래 1초 시계가 kickSlime 으로 시작
+    slimeTimerOn = false
+    void refreshSlime($)
+      .catch(() => undefined)
+      .then(() => $.ui.invalidate('ui.render'))
 
     return next(e)
   })
@@ -389,6 +499,18 @@ export const register: Register = on => {
       const last = (await read($, stories)).at(-1)
 
       return { text: last ? storyText(last) : '아직 끝난 작업이 없습니다.' }
+    }
+    // 젤리 슬라임 끄고 켜기 — 저장소에 남겨 세션이 바뀌어도 그대로
+    if (e.args.trim() === '캐릭터') {
+      characterOn = !characterOn
+      try {
+        await $.store.set('character', characterOn ? 'on' : 'off')
+      } catch {
+        // 저장을 못 해도 이 세션에선 바뀜
+      }
+      $.ui.invalidate('ui.render')
+
+      return { text: characterOn ? '캐릭터를 켰습니다.' : '캐릭터를 껐습니다. 다시 켜려면 /trace 캐릭터' }
     }
     await $.ui.open({ id: PANE, title: titleOf(), columns: 52, rows: 14 })
 
@@ -439,6 +561,7 @@ export const register: Register = on => {
     } else {
       await update($, subs, list => list.map((s): Sub => (s.id === e.agentId ? { ...s, status: 'running', ms: undefined } : s)))
     }
+    await refreshSlime($).catch(() => undefined)
 
     return next(e)
   })
@@ -521,13 +644,21 @@ export const register: Register = on => {
       await update($, subs, list =>
         list.map((s): Sub => (s.id === e.agentId ? { ...s, status: 'done', ms: now - s.startedAt } : s)),
       )
+      await refreshSlime($).catch(() => undefined)
 
       return next(e)
     }
     const last = (await read($, tasks)).at(-1)
     if (last === undefined) return next(e)
-    // 이어서 한 턴이면 걸린 시간을 더한다
-    const t: Task = { ...last, status: e.reason, ms: (last.ms ?? 0) + e.durationMs }
+    // 이어서 한 턴이면 걸린 시간을 더한다. 묻는 말로 끝났는지는 이번 턴의 답으로 새로 정한다
+    const { asked: _asked, ...rest } = last
+    const t: Task = {
+      ...rest,
+      status: e.reason,
+      ms: (last.ms ?? 0) + e.durationMs,
+      endedAt: now,
+      ...(e.reason === 'answer' && asksUser(e.answer) ? { asked: true } : {}),
+    }
     await update($, tasks, list => list.map(x => (x.id === t.id ? t : x)))
     const mine = (await read($, calls)).filter(c => c.task === t.id && c.agent === undefined)
     if (mine.length > 0) {
@@ -548,6 +679,7 @@ export const register: Register = on => {
         // 기록 파일을 못 써도 패널은 그대로
       }
     }
+    await refreshSlime($).catch(() => undefined)
 
     return next(e)
   })
@@ -570,6 +702,7 @@ export const register: Register = on => {
         s.key !== key ? s : spawned.deny !== undefined ? { ...s, status: 'denied' } : { ...s, id: spawned.agentId },
       ),
     )
+    await refreshSlime($).catch(() => undefined)
 
     return spawned
   }).catch(($, e, next) => next(e)) // 관찰 전용
@@ -608,6 +741,11 @@ export const register: Register = on => {
   on('classic.PreToolUse', async ($, e, next) => {
     const r = await next(e)
     try {
+      // 훅이 막으면 슬라임이 10초 동안 막힘(빨강)
+      if (r.deny !== undefined) {
+        lastBlockAt = await $.clock.now()
+        await refreshSlime($)
+      }
       await noteToolHook($, e.tool_use_id, {
         ...(r.deny !== undefined ? { deny: r.deny } : {}),
         ...(r.ask !== undefined ? { ask: r.ask } : {}),
@@ -704,9 +842,11 @@ export const register: Register = on => {
       ...(e.agentId !== undefined ? { agent: e.agentId } : {}),
     }
     await update($, calls, list => [...list, call].slice(-300))
+    await refreshSlime($).catch(() => undefined)
     const finish = async (status: CallStatus) => {
       const ms = (await $.clock.now()) - startedAt
       await update($, calls, list => list.map(c => (c.id === call.id ? { ...c, status, ms } : c)))
+      await refreshSlime($).catch(() => undefined)
     }
     try {
       const ran = await next(e)
@@ -828,6 +968,82 @@ export const register: Register = on => {
           </Text>
         </Box>
       ) : null
+    // 맨 위 「누구 차례」: 가장 최근 작업 기준(지난 작업을 골라 봐도 지금 상태를 보여 줌)
+    const latestTask = ts.at(-1)
+    const asking =
+      latestTask?.status === 'running' &&
+      all.some(
+        c => c.task === latestTask.id && c.agent === undefined && c.status === 'running' && c.tool === 'AskUserQuestion',
+      )
+    const [turnText, turnColor]: [string, 'warning' | 'permission' | 'success' | 'error' | undefined] =
+      latestTask === undefined
+        ? ['◦ 요청을 기다려요', undefined]
+        : latestTask.status === 'running'
+          ? asking
+            ? ['✋ 답을 기다려요 — 질문 창에서 골라 주세요', 'permission']
+            : ['▶ 작업 중', 'warning']
+          : latestTask.status === 'answer'
+            ? latestTask.asked === true
+              ? ['? 질문했어요 — 답을 기다려요', 'permission']
+              : ['✓ 끝남 — 다음 요청을 기다려요', 'success']
+            : latestTask.status === 'aborted'
+              ? ['⊘ 중단됨 — 다음 요청을 기다려요', 'error']
+              : [`✗ ${DONE_LABEL[latestTask.status]} — 다음 요청을 기다려요`, 'error']
+    const turnBanner = (
+      <Text bold={turnColor !== undefined} color={turnColor} dimColor={turnColor === undefined} wrap="wrap">
+        {turnText}
+      </Text>
+    )
+    // 젤리 슬라임: 맨 위 왼쪽(터미널은 16칸 × 8줄 격자, 데스크톱 · VS Code 는 SVG 한 장). 폭 40칸 미만 · 끔 · 모바일이면 없음
+    const els = $.ui.resolve(e) as unknown as {
+      Raster?: (p: RasterProps) => JSX.Element
+      Svg?: (p: SvgProps) => JSX.Element
+    }
+    // Raster 는 터미널 전용(다른 화면 표에선 아무것도 안 그리는 자리) → 화면 이름으로 고른다
+    const R = e.surface === 'terminal' ? els.Raster : undefined
+    const S = e.surface === 'desktop' || e.surface === 'vscode' ? els.Svg : undefined
+    const showSlime = characterOn && cols >= 40 && (R !== undefined || S !== undefined)
+    const view = slimeView(ts, all, agents, now)
+    if (e.surface === 'terminal') {
+      rasterDrawn = showSlime
+      if (showSlime) {
+        // 그릴 때 시계 쪽 상태를 화면과 맞춘다(훅 막음 10초 지남 · 꼬마가 빠짐 같은 시각 변화도 여기서 반영)
+        if (view.state !== slime.state) slime = { ...slime, state: view.state, frame: 0 }
+        slime.endedAt = view.endedAt
+        slime.minis = view.minis.map(m => m.state)
+      }
+    }
+    const frameNow = view.state === slime.state ? slime.frame : 0
+    const art = (grid: (string | null)[][], key: string, columns: number, rows: number, alt: string) => {
+      if (R) return <R key={key} columns={columns} rows={rows} cells={toCells(grid)} />
+      return S ? <S source={toSvg(grid, 6)} alt={alt} width={columns * 6} /> : null
+    }
+    // 슬라임 오른쪽: 「누구 차례」 · 지금 하는 일 · 도우미 꼬마와 이름표. 캐릭터가 없으면 「누구 차례」 한 줄만
+    const Top = (lines: JSX.Element[]) =>
+      showSlime ? (
+        <Box flexDirection="row" marginBottom={1}>
+          {art(slimeFrame(view.state, frameNow), 'slime', 16, 8, `젤리 슬라임: ${SLIME_SPEC[view.state].label}`)}
+          <Box flexDirection="column" paddingLeft={1} flexShrink={1}>
+            {turnBanner}
+            {lines}
+            {view.minis.length > 0 && (
+              <Box flexDirection="row" columnGap={1} marginTop={1}>
+                {view.minis.map((m, i) => art(miniFrame(m.state, frameNow), `mini-${i}`, 8, 4, m.label))}
+              </Box>
+            )}
+            {view.minis.length > 0 && (
+              <Text wrap="wrap">
+                {view.minis.map((m, i) => (
+                  <Text color={SLIME_SPEC[m.state].accent}>{`${i > 0 ? '  ' : ''}${m.label}`}</Text>
+                ))}
+                {view.more > 0 && <Text dimColor>{`  +${view.more}`}</Text>}
+              </Text>
+            )}
+          </Box>
+        </Box>
+      ) : (
+        turnBanner
+      )
     const hudBox =
       hud !== '' || hostRow !== null ? (
         <Box flexDirection="column" marginTop={1}>
@@ -843,6 +1059,7 @@ export const register: Register = on => {
     if (t === undefined) {
       return (
         <Box flexDirection="column" width={cols}>
+          {Top([])}
           {warnBox}
           <Text dimColor>아직 작업이 없습니다. 요청을 보내면 여기에 과정이 흐릅니다.</Text>
           {hudBox}
@@ -1017,14 +1234,14 @@ export const register: Register = on => {
       const outer = taskNotes.filter(h => h.group === 0).slice(-3)
       used +=
         2 + // 카드 테두리
-        linesOf(`지금 ${nowText}`, cardW) +
+        (showSlime ? 0 : linesOf(`지금 ${nowText}`, cardW)) + // 슬라임이 있으면 「지금」 은 슬라임 오른쪽
         3 +
         asks.reduce((n, a) => n + linesOf(`추가 요청 ${a}`, cardW), 0) +
         outer.reduce((n, h) => n + linesOf(`⚑ 훅이 ${hookLabel(h)}`, cardW), 0)
       head = Card(
         'warning',
         <Box flexDirection="column">
-          {Row('지금', nowText, { bold: true })}
+          {!showSlime && Row('지금', nowText, { bold: true })}
           {asks.map(a => Row('추가 요청', firstSentence(a)))}
           {outer.map(h => HookRow(h, '훅이 '))}
           <Progress label="진행" value={pct} max={100} valueText={pctText} />
@@ -1131,6 +1348,9 @@ export const register: Register = on => {
 
     const bgRows = activeAgents.length > 0 || bgs.length > 0 ? 2 + activeAgents.length * 2 + bgs.length : 0
     used +=
+      linesOf(turnText, cols) +
+      // 슬라임 자리: 8줄(+ 아래 한 줄) — 꼬마가 있으면 오른쪽이 더 길어짐
+      (showSlime ? Math.max(0, 9 - linesOf(turnText, cols)) + (view.minis.length > 0 ? 6 : 0) : 0) +
       bgRows +
       (hud !== '' || hostRow !== null ? 1 : 0) +
       (hud !== '' ? 1 : 0) +
@@ -1297,6 +1517,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column" width={cols}>
+        {Top(isRunning ? [Row('지금', nowText, { bold: true })] : [])}
         {warnBox}
         {taskList}
         {head}

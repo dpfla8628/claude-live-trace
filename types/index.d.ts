@@ -60,6 +60,10 @@ export type Task = {
   ms?: number
   /** 작업 중에 사용자가 더 보낸 요청(엔진이 지금 턴에 넣어 준 것) */
   asks?: string[]
+  /** 마지막 턴의 답이 사용자에게 묻는 말로 끝남(→ 「질문했어요 — 답을 기다려요」) */
+  asked?: true
+  /** 마지막 턴이 끝난 때(5분 지나면 슬라임이 쉬는 중) */
+  endedAt?: number
 }
 
 export type Sub = {

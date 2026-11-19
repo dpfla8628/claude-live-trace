@@ -2,6 +2,7 @@ import type { On } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
+  asksUser,
   citedCommits,
   countActions,
   evidenceOf,
@@ -19,6 +20,7 @@ import {
   storyText,
   upsertLog,
 } from './describe'
+import { slimeFrame, toCells } from './slime'
 
 const PANE = {
   plugin: 'live-trace',
@@ -169,7 +171,15 @@ describe('한국어 동작 이름과 단계', () => {
 })
 
 type Ran = { exitCode: number; stdout: string; stderr: string }
-const engine = (on: On, opts: { env?: Record<string, string>; run?: (argv: readonly string[]) => Ran } = {}) => {
+/** 손으로 돌리는 시계: 걸린 시계마다 한 칸, go() 로 한 번 울림 */
+type Timer = { kind: 'every' | 'after'; ms: number; go: () => void }
+const engine = (
+  on: On,
+  opts: { env?: Record<string, string>; run?: (argv: readonly string[]) => Ran; timers?: Timer[]; time?: { skip: number } } = {},
+) => {
+  // 시계는 시험이 go() 할 때만 울린다(그 밖에는 기다리기만)
+  on('clock.every', (_, e) => new Promise(r => opts.timers?.push({ kind: 'every', ms: e.ms, go: () => r({ value: undefined }) })))
+  on('clock.after', (_, e) => new Promise(r => opts.timers?.push({ kind: 'after', ms: e.ms, go: () => r({ value: undefined }) })))
   // 디스크 · 메모리 재기 · 정리 명령: 답을 안 주면 실패로(패널은 그 줄만 뺀다)
   on('process.run', (_, e) => ({
     value: { isStdoutTruncated: false, isStderrTruncated: false, ...(opts.run?.(e.argv) ?? { exitCode: 1, stdout: '', stderr: '' }) },
@@ -184,9 +194,9 @@ const engine = (on: On, opts: { env?: Record<string, string>; run?: (argv: reado
     value: { startedAt: 0, context: { window: 1000, percent: 45 }, rateLimits: [{ kind: 'five_hour', percentUsed: 23 }] },
   }))
   on('env.get', (_, e) => ({ value: opts.env?.[e.name] }))
-  on('clock.every', () => ({ value: () => undefined }) as never)
   let now = 1000
-  on('clock.now', () => ({ value: (now += 100) }))
+  // 부를 때마다 0.1초 + 시험이 건너뛴 시간(time.skip)
+  on('clock.now', () => ({ value: (now += 100) + (opts.time?.skip ?? 0) }))
 }
 
 // 도구 조각 하나를 부르는 응답: 생각(무시돼야 함) → 앞 문장 → 도구
@@ -304,8 +314,9 @@ test('끝나면 작업 설명(걸린 시간 · 살펴본 것), 바꾼 뒤 검증
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /^작업 설명/ }))?.text).toBe('작업 설명  끝남, 1분 15초')
   // 제목 아래 한 줄에 하나씩
+  // 글 찾기는 부분 일치라 맨 위 「다음 요청을 기다려요」와 겹치지 않게 줄 전체로 찾는다
   for (const t of ['요청', '이 네모 버튼 이상해', '쓴 스킬', '디자인-반영', '확인한 것', '소스 1개', '1곳 고침', '검증']) {
-    expect((await ui.find({ type: 'Text', text: t }))?.text).toBe(t)
+    expect((await ui.find({ type: 'Text', text: new RegExp(`^${t}$`) }))?.text).toBe(t)
   }
   expect(await ui.find({ type: 'Text', text: /판단 근거|따른 지침/ })).toBe(undefined)
   expect((await ui.find({ type: 'Text', text: /검증하지 않았습니다/ }))?.text).toBe('✗ 바꾼 뒤 검증하지 않았습니다')
@@ -681,6 +692,189 @@ test('도구 앞 문장을 영어로 쓰면 그 도구 결과에 「한국어로
   expect(isEnglish('Now the tests.')).toBe(true)
   expect(isEnglish('Now I run the tests and the type check together.')).toBe(true)
   expect(isEnglish('uv cache clean 을 돌립니다')).toBe(false)
+})
+
+test('맨 위 「누구 차례」: 작업 중 → 질문 창이 열리면 답을 기다려요 → 질문으로 끝나면 답을 기다려요 → 끝나면 다음 요청', async ($, on) => {
+  engine(on)
+  on('turn.step', async function* () {
+    return yield* say('[1/2] 어느 쪽으로 할지 여쭙니다', 'u1', 'AskUserQuestion')()
+  })
+  let answer: (() => void) | undefined
+  on('tool.call', (_, e) =>
+    String(e.tool) === 'AskUserQuestion'
+      ? new Promise(r => {
+          answer = () => r({ result: {}, text: '' })
+        })
+      : { result: {}, text: '' },
+  )
+  const banner = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const text = (await ui.find({ type: 'Text', text: /^[◦▶✋?✓⊘✗] / }))?.text
+    await ui.unmount()
+    return text
+  }
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(await banner()).toBe('◦ 요청을 기다려요')
+  await $.turn.start({ text: '캐릭터 만들어줘', turnId: 't1' })
+  await $.tool.call({ tool: 'Grep', pattern: 'x', tool_use_id: 'u0' } as never)
+  expect(await banner()).toBe('▶ 작업 중')
+  await drain($.turn.step({ turnId: 't1', index: 0, model: 'opus', messageCount: 1 }))
+  const asking = $.tool.call({ tool: 'AskUserQuestion', questions: [], tool_use_id: 'u1' } as never)
+  for (let i = 0; i < 10_000 && answer === undefined; i++) await Promise.resolve()
+  expect(await banner()).toBe('✋ 답을 기다려요 — 질문 창에서 골라 주세요')
+  answer?.()
+  await asking
+  await $.turn.complete({ answer: '두 안 중 어느 쪽으로 할까요?', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+  expect(await banner()).toBe('? 질문했어요 — 답을 기다려요')
+  await $.turn.start({ text: '첫째 안으로', turnId: 't2' })
+  await $.tool.call({ tool: 'Grep', pattern: 'y', tool_use_id: 'u2' } as never)
+  await $.turn.complete({ answer: '첫째 안으로 만들었습니다.', durationMs: 1000, isAborted: false, turnId: 't2', reason: 'answer' } as never)
+  expect(await banner()).toBe('✓ 끝남 — 다음 요청을 기다려요')
+  await $.turn.start({ text: '멈춰', turnId: 't3' })
+  await $.turn.complete({ answer: '', durationMs: 10, isAborted: true, turnId: 't3', reason: 'aborted' } as never)
+  expect(await banner()).toBe('⊘ 중단됨 — 다음 요청을 기다려요')
+})
+
+test('끝난 답이 질문인지: 물음표 · 「할까요」 · 「주세요」로 끝나면 질문', async () => {
+  expect(asksUser('두 안 중 어느 쪽으로 할까요?')).toBe(true)
+  expect(asksUser('결과입니다.\n\n어색하면 알려 주세요.')).toBe(true)
+  expect(asksUser('다 했습니다.\n\n```\ncode?\n```')).toBe(false)
+  expect(asksUser('첫째 안으로 만들었습니다.')).toBe(false)
+  expect(asksUser('')).toBe(false)
+})
+
+test('젤리 슬라임: 맨 위 16×8 격자 + 오른쪽 상태 글, 도우미 꼬마와 이름표, 데스크톱은 SVG, 좁으면 없음', async ($, on) => {
+  engine(on)
+  on('tool.call', () => ({ result: {}, text: '' }))
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'a1' }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: '버튼 고쳐줘', turnId: 't1' })
+  await $.tool.call({ tool: 'Grep', pattern: 'x', tool_use_id: 'u0' } as never)
+  await $.agent.spawn({ tool_use_id: 'u1', subagentType: 'Explore', description: '버튼 찾기', prompt: 'x' } as never)
+  await $.tool.call({ tool: 'Grep', pattern: 'radius', agentId: 'a1', tool_use_id: 'u2' } as never)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const big = await ui.find({ type: 'Raster', key: 'slime' })
+  expect([big?.props.columns, big?.props.rows]).toEqual([16, 8])
+  const mini = await ui.find({ type: 'Raster', key: 'mini-0' })
+  expect([mini?.props.columns, mini?.props.rows]).toEqual([8, 4])
+  expect((await ui.find({ type: 'Text', text: /탐색 · 찾는 중/ })) !== undefined).toBe(true)
+  // 「누구 차례」 줄은 슬라임 오른쪽에 그대로
+  expect((await ui.find({ type: 'Text', text: /^▶ 작업 중/ }))?.text).toBe('▶ 작업 중')
+  await ui.unmount()
+
+  const desk = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await desk.find({ type: 'Raster' })).toBe(undefined)
+  expect((await desk.find({ type: 'Svg' }))?.props.alt).toBe('젤리 슬라임: 생각 중')
+  await desk.unmount()
+
+  const narrow = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 38 } })
+  expect(await narrow.find({ type: 'Raster' })).toBe(undefined)
+  expect((await narrow.find({ type: 'Text', text: /^▶ 작업 중/ }))?.text).toBe('▶ 작업 중')
+  await narrow.unmount()
+})
+
+test('/trace 캐릭터 로 끄고 켜며, 설정은 저장소에 남는다', async ($, on) => {
+  engine(on)
+  const store = new Map<string, unknown>()
+  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  const slimeShown = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const found = await ui.find({ type: 'Raster', key: 'slime' })
+    await ui.unmount()
+    return found !== undefined
+  }
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(await slimeShown()).toBe(true)
+  const off = await $.command.run({ command: 'trace', args: '캐릭터' } as never)
+  expect(off.text).toBe('캐릭터를 껐습니다. 다시 켜려면 /trace 캐릭터')
+  expect(store.get('character')).toBe('off')
+  expect(await slimeShown()).toBe(false)
+  const back = await $.command.run({ command: 'trace', args: '캐릭터' } as never)
+  expect(back.text).toBe('캐릭터를 켰습니다.')
+  expect(store.get('character')).toBe('on')
+  expect(await slimeShown()).toBe(true)
+})
+
+// 걸린 시계 중 하나를 울리고 그 뒤 일이 끝날 때까지 기다림
+const fire = async (timers: Timer[], pick: (t: Timer) => boolean) => {
+  const i = timers.findIndex(pick)
+  const [t] = i < 0 ? [] : timers.splice(i, 1)
+  t?.go()
+  for (let k = 0; k < 5_000; k++) await Promise.resolve()
+  return t !== undefined
+}
+const second = (t: Timer) => t.kind === 'every' && t.ms === 1000
+const slimeTick = (t: Timer) => t.kind === 'after'
+
+test('슬라임 시계: 0.2초마다 깨지 않고 상태 간격마다 한 장, 패널이 안 보여 거절되면 멈추고 다시 그려지면 1초 시계가 다시 건다', async ($, on) => {
+  const timers: Timer[] = []
+  engine(on, { timers })
+  const blits: string[] = []
+  let deny = false
+  on('ui.blit', (_, e) => {
+    blits.push(e.key)
+    return { value: deny ? { deny: '안 그려짐' } : {} }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  // 0.2초짜리 시계는 없다
+  expect(timers.some(t => t.ms === 200)).toBe(false)
+  // 아직 안 그려졌으면 1초 시계가 울려도 슬라임 시계를 걸지 않음
+  await fire(timers, second)
+  expect(timers.some(slimeTick)).toBe(false)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await fire(timers, second)
+  // 쉬는 중(작업 없음) 간격 0.7초로 한 번 걸림
+  expect(timers.filter(slimeTick).map(t => t.ms)).toEqual([700])
+  await fire(timers, slimeTick)
+  expect(blits).toEqual(['slime'])
+  expect(timers.filter(slimeTick).length).toBe(1)
+  // 가려짐: 거절되면 멈춤(다시 걸지 않음)
+  deny = true
+  await fire(timers, slimeTick)
+  expect(blits.length).toBe(2)
+  expect(timers.some(slimeTick)).toBe(false)
+  await ui.unmount()
+  // 다시 그려지면 1초 시계가 다시 건다
+  deny = false
+  const again = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await fire(timers, second)
+  await fire(timers, slimeTick)
+  expect(blits.length).toBe(3)
+  await again.unmount()
+})
+
+test('그릴 때 시계 쪽 슬라임 상태를 화면과 맞춘다: 훅 막음 10초가 지나면 장 넘기기도 막힘(빨강)을 그만 그림', async ($, on) => {
+  const timers: Timer[] = []
+  const time = { skip: 0 }
+  engine(on, { timers, time })
+  on('tool.call', () => ({ result: {}, text: '' }))
+  on('classic.PreToolUse', () => ({ deny: 'resource-guard: 보류했습니다.' }))
+  let lastCells = ''
+  on('ui.blit', (_, e) => {
+    lastCells = 'cells' in e ? e.cells : ''
+    return { value: {} }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: '디스크 봐줘', turnId: 't1' })
+  await $.tool.call({ tool: 'Bash', command: 'df', description: '디스크 보기', tool_use_id: 'u1' } as never)
+  // 막은 직후 그리면 시계 쪽도 막힘
+  const blocked = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await blocked.unmount()
+  // 11초 건너뛴 뒤 다시 그림 → 생각 중으로 맞춰짐
+  time.skip = 11_000
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await fire(timers, second)
+  await fire(timers, slimeTick)
+  expect(lastCells).toBe(toCells(slimeFrame('think', 1)))
+  await ui.unmount()
 })
 
 test('아무 일도 없을 때 안내 문구', async $ => {
