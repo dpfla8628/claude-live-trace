@@ -110,6 +110,8 @@ describe('한국어 동작 이름과 단계', () => {
     // 첫 숫자는 남기고 목록 머리만 뗀다
     expect(parseNarration('[2/3] 6이라는 숫자를 정한 자리를 봅니다').title).toBe('6이라는 숫자를 정한 자리를 봅니다')
     expect(parseNarration('1. 버튼부터 봅니다').title).toBe('버튼부터 봅니다')
+    // 설명 상자 테두리(글자 없는 줄)는 제목이 아니다
+    expect(parseNarration('[2/5] 테스트를 돌립니다\n`─────────────`').title).toBe('테스트를 돌립니다')
   })
 
   test('동작은 파일 이름 대신 종류별 개수로, 줄 수는 한글 2칸으로 센다', async () => {
@@ -700,7 +702,10 @@ test('도구 앞 문장을 영어로 쓰면 그 도구 결과에 「한국어로
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.turn.start({ text: '확인해줘', turnId: 't1' })
   await drain($.turn.step({ turnId: 't1', index: 0, model: 'opus', messageCount: 1 }))
-  expect((await post('u1')).additionalContext?.at(-1)).toContain('다음 문장부터 반드시 한국어로 쓴다')
+  const note = (await post('u1')).additionalContext?.at(-1)
+  expect(note).toContain('다음 문장부터 반드시 한국어로 쓴다')
+  // 안내에 「Writing in Korean.」 같은 대답 문장을 쓰면 그게 또 흐름 한 줄이 된다
+  expect(note).toContain('이 안내에 대답하지 않는다')
   // 한 번만
   expect((await post('u1')).additionalContext).toBe(undefined)
   // 한국어 문장 · 파일 이름만 영어인 문장은 붙이지 않는다
@@ -710,6 +715,58 @@ test('도구 앞 문장을 영어로 쓰면 그 도구 결과에 「한국어로
   expect(isEnglish('Now the tests.')).toBe(true)
   expect(isEnglish('Now I run the tests and the type check together.')).toBe(true)
   expect(isEnglish('uv cache clean 을 돌립니다')).toBe(false)
+})
+
+test('영어로 쓴 도구 앞 문장은 패널이 뒤에서 한국어로 옮겨 보여 준다(옮기는 동안 영어는 안 보임 · 못 옮기면 원문)', async ($, on) => {
+  engine(on)
+  const usage = { input_tokens: 0, output_tokens: 0 }
+  const asked: { model: string; prompt: string }[] = []
+  let answer: (ko: string | undefined) => void = () => undefined
+  on('model.complete', (_, e) => {
+    asked.push({ model: e.model, prompt: e.prompt })
+    return new Promise(r => {
+      answer = ko =>
+        r({ value: ko === undefined ? { isAnswered: false, reason: 'empty-reply', usage } : { isAnswered: true, text: ko, usage } } as never)
+    })
+  })
+  let reply = say('[1/2] Now I run the tests and the type check together.', 'u1', 'Bash')
+  on('turn.step', async function* () {
+    return yield* reply()
+  })
+  on('tool.call', () => ({ result: {}, text: '' }))
+  const spin = async () => {
+    for (let k = 0; k < 5_000; k++) await Promise.resolve()
+  }
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await $.turn.start({ text: '시험 돌려줘', turnId: 't1' })
+  await drain($.turn.step({ turnId: 't1', index: 0, model: 'opus', messageCount: 1 }))
+  await $.tool.call({ tool: 'Bash', command: 'npm test', description: '테스트', tool_use_id: 'u1' } as never)
+  await spin()
+  // 작은 모델(haiku)에 문장만 보낸다
+  expect(asked.map(a => a.model)).toEqual(['haiku'])
+  expect(asked[0]?.prompt).toContain('Now I run the tests and the type check together.')
+  expect(await ui.find({ text: /Now I run/ })).toBe(undefined)
+  expect(await ui.find({ text: /한국어로 옮기는 중/ })).not.toBe(undefined)
+  answer('테스트와 타입 검사를 함께 돌립니다.')
+  await spin()
+  expect(await ui.find({ text: /테스트와 타입 검사를 함께 돌립니다/ })).not.toBe(undefined)
+  expect(await ui.find({ text: /한국어로 옮기는 중/ })).toBe(undefined)
+  // 한국어 문장은 옮기지 않는다
+  reply = say('결과를 봅니다', 'u2', 'Bash', 1)
+  await drain($.turn.step({ turnId: 't1', index: 1, model: 'opus', messageCount: 2 }))
+  await spin()
+  expect(asked.length).toBe(1)
+  // 못 옮기면(답 없음) 원문이라도 보인다
+  reply = say('Both checks are clean.', 'u3', 'Bash', 2)
+  await drain($.turn.step({ turnId: 't1', index: 2, model: 'opus', messageCount: 3 }))
+  await $.tool.call({ tool: 'Bash', command: 'npm test', description: '테스트', tool_use_id: 'u3' } as never)
+  await spin()
+  answer(undefined)
+  await spin()
+  expect(await ui.find({ text: /Both checks are clean/ })).not.toBe(undefined)
+  await ui.unmount()
 })
 
 test('맨 위 「누구 차례」: 작업 중 → 질문 창이 열리면 답을 기다려요 → 질문으로 끝나면 답을 기다려요 → 끝나면 다음 요청', async ($, on) => {

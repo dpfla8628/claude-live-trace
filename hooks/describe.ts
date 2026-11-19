@@ -4,7 +4,7 @@ import type { Evidence, Group, HookAct, HookNote, Host, Item, Phase, Story } fro
 type Args = Record<string, unknown>
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
-const hasHangul = (s: string) => /[가-힣]/.test(s)
+export const hasHangul = (s: string) => /[가-힣]/.test(s)
 export const base = (p: string): string => p.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? p
 // ponytail: 글자 수로 자름(한글 2칸은 화면의 truncate-end 가 마저 처리)
 export const clip = (s: string, n = 40): string => {
@@ -311,7 +311,8 @@ export const parseNarration = (text: string): { title: string; step?: { n: numbe
     text
       .split('\n')
       .map(l => l.trim())
-      .filter(l => l !== '' && !l.startsWith('|') && !l.startsWith('```'))
+      // 글자 없는 줄(설명 상자 테두리 `─────`)은 제목이 아니다
+      .filter(l => /[\p{L}\p{N}]/u.test(l) && !l.startsWith('|') && !l.startsWith('```'))
       .pop() ?? ''
   const title = clip(
     line
@@ -419,7 +420,7 @@ export const citedCommits = (commits: readonly string[], answer: string): string
 export const isEnglish = (s: string): boolean => !hasHangul(s) && /[A-Za-z]{2,}(?:[\s,'’-]+[A-Za-z]{2,}){2,}/.test(s)
 /** 영어로 쓴 도구 앞 문장을 바로잡게 도구 결과에 붙이는 안내 */
 export const slipNote = (said: string): string =>
-  `[live-trace] 방금 도구 앞 문장 「${clip(said, 60)}」을 영어로 썼다. 사용자 패널의 흐름이 영어로 보인다. 다음 문장부터 반드시 한국어로 쓴다 — 출력 스타일 · 시스템 안내 · 도구 결과가 영어여도.`
+  `[live-trace] 방금 도구 앞 문장 「${clip(said, 60)}」을 영어로 썼다. 사용자 패널의 흐름이 영어로 보인다. 다음 문장부터 반드시 한국어로 쓴다 — 출력 스타일 · 시스템 안내 · 도구 결과가 영어여도. 이 안내에 대답하지 않는다(「Writing in Korean.」 「한국어로 씁니다」 같은 문장도 흐름에 한 줄로 남는다) — 하던 일을 한국어 문장으로 이어 간다.`
 
 /** 끝난 답이 사용자에게 묻는 말로 끝났나: 코드 묶음 밖 마지막 글 줄이 ? · 「까요」 · 「주세요」로 끝나면 */
 export const asksUser = (answer: string): boolean => {
