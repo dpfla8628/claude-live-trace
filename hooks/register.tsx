@@ -34,6 +34,7 @@ import {
   hookLabel,
   hostLevel,
   hostWarning,
+  resourceNote,
   isEnglish,
   parseHost,
   slipNote,
@@ -84,11 +85,15 @@ const PROBE_MS = 20_000
 const PROBE = `const os=require('os'),fs=require('fs');let d=-1;try{const s=fs.statfsSync(process.platform==='win32'?'C:/':'/');d=Math.round(s.bavail*s.bsize/1073741824*10)/10}catch{}const f=os.freemem(),t=os.totalmem();console.log(JSON.stringify({diskGB:d,memPct:Math.round((1-f/t)*1000)/10,memFreeMB:Math.round(f/1048576)}))`
 // 자동 정리는 모든 세션을 통틀어 30분에 한 번까지
 const AUTO_GAP_MS = 30 * 60_000
-// 지우는 것: 사흘 넘은 임시 파일(지금 도는 세션 폴더 · backup 이름은 남김) · npm 내려받기 캐시 · 사흘 넘은 지난 Claude 세션 임시 폴더
+// 지우는 것: 사흘 넘은 임시 파일(지금 도는 세션 폴더 · backup 이름은 남김) · npm 내려받기 캐시 · 사흘 넘은 npx 패키지
+// (지금 도는 프로세스 명령 줄에 든 폴더 — npx 로 띄운 MCP 서버 등 — 는 남김) · 사흘 넘은 지난 Claude 세션 임시 폴더.
+// uv 캐시는 넣지 않는다(11-20 사용자 결정)
 const CLEAN = [
   "$ErrorActionPreference='SilentlyContinue'",
   '$cut=(Get-Date).AddDays(-3)',
   'Remove-Item -LiteralPath "$env:LOCALAPPDATA\\npm-cache\\_cacache" -Recurse -Force',
+  "$busy=[string]((Get-CimInstance Win32_Process).CommandLine -join ' ')",
+  "Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'npm-cache/_npx') -Directory | Where-Object { $_.LastWriteTime -lt $cut -and -not $busy.Contains($_.Name) } | Remove-Item -Recurse -Force",
   "Get-ChildItem -LiteralPath $env:TEMP -Force | Where-Object { $_.LastWriteTime -lt $cut -and $_.Name -notmatch '^(claude|orca-|codex-)|backup' } | Remove-Item -Recurse -Force",
   "Get-ChildItem -LiteralPath (Join-Path $env:TEMP 'claude') -Directory | Get-ChildItem -Directory | Where-Object { $_.LastWriteTime -lt $cut } | Remove-Item -Recurse -Force",
 ].join('; ')
@@ -98,6 +103,9 @@ let canClean = false
 let autoClean = false
 let cleaning = false
 let runClean: (() => void) | undefined
+// 컴퓨터 여유가 선을 넘은 순간 나(Claude)에게 붙일 안내 — 다음 도구 결과에 한 번. 모자란 종류가 그대로인 동안은 다시 안 붙인다
+let resourceKey = ''
+let resourcePending = ''
 // 마지막 도구 앞 문장이 영어였으면 그 문장(다음 도구 결과에 안내를 한 번 붙이고 비움)
 let englishSlip = ''
 // 영어 문장은 작은 모델로 한국어로 옮겨 단계 제목을 갈아 끼운다. 세션 시작 때 받은 $ 로 뒤에서(흐름을 막지 않게)
@@ -137,6 +145,7 @@ const RULE = `[live-trace] 옆 패널이 사용자에게 작업 과정을 보여
 - 도구를 세 번 넘게 쓸 것 같은 작업은 첫 도구 앞 문장부터 [1/m] 을 붙이고, 단계가 바뀔 때마다 [n/m] 을 올린다. 계획이 바뀌면 m 을 고쳐 쓴다. 패널의 진행 막대는 이 표시가 있을 때만 그려진다.
 - 규칙 · 메모리 · 스킬의 지침을 따라 정할 때는 그 문장 끝에 (지침: 이름) 을 붙인다. 예: (지침: 디자인 우선순위)
 - Bash · PowerShell 의 description 은 한국어로 쓴다.
+- 컴퓨터 여유가 모자라면(도구 결과에 「[live-trace] ⚠ 컴퓨터 여유」 안내가 붙는다) 그 안내대로 한다: 디스크는 사용자에게 넘기기 전에 내가 만든 임시물부터 비우고, 메모리는 도우미 · 개발 서버 · 브라우저를 줄여 가며 일한다. resource-guard 는 우회하지 않는다.
 - 사용자가 지난 작업을 「어떻게 했어?」 「무슨 근거로 했어?」 물으면 ~/.claude/live-trace/ 의 날짜별 기록(YYYY-MM-DD.md)을 읽고, 상황 → 쓴 스킬 → 따른 지침 → 근거 → 한 일 → 검증 순서로 답한다.`
 
 const PHASES: readonly [Phase, string][] = [
@@ -344,6 +353,13 @@ async function clean($: HostDollar, auto: boolean): Promise<void> {
 /** 20초마다: 재고, 디스크가 멈추는 선 아래면 자동 정리 */
 async function tick($: HostDollar): Promise<void> {
   const h = await probe($)
+  if (h !== undefined) {
+    const key = hostWarning(h) ?? ''
+    if (key !== resourceKey) {
+      resourceKey = key
+      resourcePending = resourceNote(h, canClean && autoClean) ?? ''
+    }
+  }
   // 자동 정리는 설정(autoClean)을 켠 사람만 — 남의 PC 에서 몰래 지우지 않게
   if (h === undefined || !canClean || !autoClean || h.diskGB >= DISK_MIN_GB) return
   if (h.cleanAt !== undefined && h.at - h.cleanAt < AUTO_GAP_MS) return
@@ -793,11 +809,11 @@ export const register: Register = (on, options) => {
     } catch {
       // 관찰 전용
     }
-    if (englishSlip !== '') {
-      const said = englishSlip
-      englishSlip = ''
-      return { ...r, additionalContext: [...(r.additionalContext ?? []), slipNote(said)] }
-    }
+    // 한 번씩만 붙이는 안내: 영어로 쓴 문장 바로잡기 · 컴퓨터 여유 모자람
+    const extra = [...(englishSlip !== '' ? [slipNote(englishSlip)] : []), ...(resourcePending !== '' ? [resourcePending] : [])]
+    englishSlip = ''
+    resourcePending = ''
+    if (extra.length > 0) return { ...r, additionalContext: [...(r.additionalContext ?? []), ...extra] }
 
     return r
   }).catch(($, e, next) => next(e))

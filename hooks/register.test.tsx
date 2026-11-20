@@ -9,6 +9,7 @@ import {
   hookLine,
   hostLevel,
   hostWarning,
+  resourceNote,
   isEnglish,
   labelOf,
   parseHost,
@@ -609,6 +610,17 @@ test('컴퓨터 여유: 선은 resource-guard 와 같다(디스크 2GB · 메모
   expect(hostLevel({ diskGB: 20, memPct: 50, memFreeMB: 9000 })).toBe('ok')
   expect(hostWarning({ diskGB: 1, memPct: 50, memFreeMB: 9000 })).toBe('디스크가 모자랍니다(2GB 아래)')
   expect(hostWarning({ diskGB: 20, memPct: 50, memFreeMB: 9000 })).toBe(undefined)
+  // 강제 안내(도구 결과에 붙임): 지금 값 + 할 일. 넉넉하면 없음
+  expect(resourceNote({ diskGB: 20, memPct: 50, memFreeMB: 9000 }, true)).toBe(undefined)
+  const d = resourceNote({ diskGB: 1.5, memPct: 50, memFreeMB: 9000 }, true)
+  expect(d).toContain('C 드라이브 여유 1.5GB')
+  expect(d).toContain('내가 만든 임시물')
+  expect(d).toContain('패널도 뒤에서 자동 정리를 돌린다')
+  expect(d).not.toContain('메모리')
+  const m = resourceNote({ diskGB: 40, memPct: 93, memFreeMB: 1200 }, false)
+  expect(m).toContain('메모리 93%(가용 1.2GB)')
+  expect(m).toContain('도우미는 한 번에 하나씩')
+  expect(m).not.toContain('C 드라이브')
   // 디스크를 못 쟀거나(-1) 모양이 틀리면 줄을 띄우지 않는다
   expect(parseHost('{"diskGB":-1,"memPct":1,"memFreeMB":1}')).toBe(undefined)
   expect(parseHost('x')).toBe(undefined)
@@ -638,11 +650,13 @@ test('자동 정리는 기본으로 꺼져 있다: 디스크가 2GB 아래여도
 test('컴퓨터 여유: 자동 정리를 켜면 디스크가 2GB 아래일 때 뒤에서 정리하고 알리며, [ 정리하기 ] 로도 돌린다', { options: { autoClean: true } }, async ($, on) => {
   const disks = [1.5, 1.5, 3.1, 3.1, 3.1, 4.2]
   const ran: string[] = []
+  const cmds: string[] = []
   const toasts: string[] = []
   engine(on, {
     env: { LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local' },
     run: argv => {
       ran.push(String(argv[0]))
+      if (argv[0] === 'powershell') cmds.push(String(argv.at(-1)))
       return argv[0] === 'node'
         ? { exitCode: 0, stdout: JSON.stringify({ diskGB: disks.shift() ?? 4.2, memPct: 61.5, memFreeMB: 9000 }), stderr: '' }
         : { exitCode: 0, stdout: '', stderr: '' }
@@ -661,6 +675,9 @@ test('컴퓨터 여유: 자동 정리를 켜면 디스크가 2GB 아래일 때 �
   // 처음 잼(1.5) → 정리 전에 다시 잼 → 정리 → 정리 뒤 잼
   expect(ran).toEqual(['node', 'node', 'powershell', 'node'])
   expect(toasts).toEqual(['디스크 자동 정리: 1.5GB → 3.1GB'])
+  // npx 로 받은 패키지(_npx)도 사흘 넘으면 지우되, 지금 도는 프로세스 명령 줄에 든 폴더(MCP 서버 등)는 건너뜀
+  expect(cmds[0]).toContain('npm-cache/_npx')
+  expect(cmds[0]).toContain('CommandLine')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /^C 여유/ }))?.text).toMatch(
     /^C 여유 3\.1GB · 메모리 61\.5% ▅▅▅ {2}\d\d:\d\d 자동 정리 1\.5 → 3\.1GB$/,
@@ -681,6 +698,7 @@ test('컴퓨터 여유: 메모리가 모자라면 맨 위에 빨간 안내(정�
       return { exitCode: 0, stdout: JSON.stringify({ diskGB: 40, memPct: 93, memFreeMB: 1200 }), stderr: '' }
     },
   })
+  on('classic.PostToolUse', () => ({}))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   for (let i = 0; i < 200_000 && ran.length === 0; i++) await Promise.resolve()
   for (let i = 0; i < 2_000; i++) await Promise.resolve()
@@ -690,6 +708,13 @@ test('컴퓨터 여유: 메모리가 모자라면 맨 위에 빨간 안내(정�
   )
   expect(ran).toEqual(['node'])
   await ui.unmount()
+  // 나(Claude)에게도: 다음 도구 결과에 지금 값 + 할 일을 한 번 붙인다(선을 넘은 순간마다 한 번)
+  const post = (id: string) =>
+    $.classic.PostToolUse({ tool_name: 'Read', tool_input: {}, tool_response: {}, tool_use_id: id } as never)
+  const note = (await post('u1')).additionalContext?.at(-1)
+  expect(note).toContain('[live-trace] ⚠ 컴퓨터 여유')
+  expect(note).toContain('메모리 93%')
+  expect((await post('u2')).additionalContext).toBe(undefined)
 })
 
 test('도구 앞 문장을 영어로 쓰면 그 도구 결과에 「한국어로」 안내를 한 번 붙인다', async ($, on) => {

@@ -356,6 +356,20 @@ export const hostWarning = (h: HostNums): string | undefined => {
   const why = [d ? '2GB 아래' : '', m ? '90% 넘음 · 가용 2GB 아래' : ''].filter(Boolean).join(' · ')
   return `${what}가 모자랍니다(${why})${m ? ' — 브라우저 탭 · 개발 서버를 줄여 보세요' : ''}`
 }
+/** 모자랄 때 Claude 의 다음 도구 결과에 한 번 붙이는 강제 안내: 지금 값 + 할 일. 넉넉하면 undefined */
+export const resourceNote = (h: HostNums, autoClean: boolean): string | undefined => {
+  const parts = [
+    diskLow(h)
+      ? `C 드라이브 여유 ${h.diskGB}GB(2GB 아래 — resource-guard 가 셸을 막을 수 있다). 사용자에게 넘기기 전에 내가 만든 임시물(캡처용 브라우저 프로필 · 빌드 결과 · 안 쓰는 워크트리)부터 지운다${autoClean ? ' — 패널도 뒤에서 자동 정리를 돌린다' : ''}. 여유가 돌아올 때까지 새 워크트리 · 큰 설치 · 큰 파일을 만들지 않는다.`
+      : '',
+    memLow(h)
+      ? `메모리 ${h.memPct}%(가용 ${(h.memFreeMB / 1024).toFixed(1)}GB). 일을 줄여 가며 한다 — 도우미는 한 번에 하나씩, 내가 띄운 개발 서버 · 헤드리스 브라우저는 다 쓰면 바로 내리고, 전체 빌드 · 전체 테스트는 나눠 돌린다. 남이 띄운 프로세스는 끄지 않는다.`
+      : '',
+  ].filter(Boolean)
+  return parts.length === 0
+    ? undefined
+    : `[live-trace] ⚠ 컴퓨터 여유가 모자란다 — ${parts.join(' ')} resource-guard 는 우회하지 않는다. 이 안내에 대답하지 않고 하던 일을 이어 간다.`
+}
 /** 잰 값 · host.json 글 → Host. 모양이 틀리거나 디스크를 못 쟀으면 undefined */
 export const parseHost = (s: string): Host | undefined => {
   try {
