@@ -1037,28 +1037,31 @@ export const register: Register = (on, options) => {
       if (R) return <R key={key} columns={columns} rows={rows} cells={toCells(grid)} />
       return S ? <S source={toSvg(grid, 6)} alt={alt} width={columns * 6} /> : null
     }
-    // 슬라임 오른쪽: 「누구 차례」 · 지금 하는 일 · 도우미 꼬마와 이름표. 캐릭터가 없으면 「누구 차례」 한 줄만
+    // 슬라임 오른쪽: 「누구 차례」 · 지금 하는 일. 도우미 꼬마는 슬라임 아래 따로 한 줄(꼬마마다 이름표를 바로 밑에)
+    // — 오른쪽 칸에 같이 쌓으면 슬라임(8줄)보다 길어져 꼬마가 아래 오른쪽 구석으로 밀린다. 캐릭터가 없으면 「누구 차례」 한 줄만
     const Top = (lines: JSX.Element[]) =>
       showSlime ? (
-        <Box flexDirection="row" marginBottom={1}>
-          {art(slimeFrame(view.state, frameNow), 'slime', 16, 8, `젤리 슬라임: ${SLIME_SPEC[view.state].label}`)}
-          <Box flexDirection="column" paddingLeft={1} flexShrink={1}>
-            {turnBanner}
-            {lines}
-            {view.minis.length > 0 && (
-              <Box flexDirection="row" columnGap={1} marginTop={1}>
-                {view.minis.map((m, i) => art(miniFrame(m.state, frameNow), `mini-${i}`, 8, 4, m.label))}
-              </Box>
-            )}
-            {view.minis.length > 0 && (
-              <Text wrap="wrap">
-                {view.minis.map((m, i) => (
-                  <Text color={SLIME_SPEC[m.state].accent}>{`${i > 0 ? '  ' : ''}${m.label}`}</Text>
-                ))}
-                {view.more > 0 && <Text dimColor>{`  +${view.more}`}</Text>}
-              </Text>
-            )}
+        <Box flexDirection="column" marginBottom={1}>
+          <Box flexDirection="row">
+            {art(slimeFrame(view.state, frameNow), 'slime', 16, 8, `젤리 슬라임: ${SLIME_SPEC[view.state].label}`)}
+            <Box flexDirection="column" paddingLeft={1} flexShrink={1}>
+              {turnBanner}
+              {lines}
+            </Box>
           </Box>
+          {view.minis.length > 0 && (
+            <Box flexDirection="row" columnGap={2}>
+              {view.minis.map((m, i) => (
+                <Box key={`helper-${i}`} flexDirection="column" flexShrink={1}>
+                  {art(miniFrame(m.state, frameNow), `mini-${i}`, 8, 4, m.label)}
+                  <Text color={SLIME_SPEC[m.state].accent} wrap="wrap">
+                    {m.label}
+                  </Text>
+                </Box>
+              ))}
+              {view.more > 0 && <Text dimColor>{`+${view.more}`}</Text>}
+            </Box>
+          )}
         </Box>
       ) : (
         turnBanner
