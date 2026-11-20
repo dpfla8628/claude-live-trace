@@ -375,6 +375,10 @@ const slimeView = (ts: readonly Task[], all: readonly Call[], agents: readonly S
   return { state, endedAt: t?.endedAt, minis: minis.slice(0, 3), more: Math.max(0, minis.length - 3) }
 }
 
+// 도우미 꼬마 한 칸: 그림 8칸 + 양옆 1칸. 이름표 「탐색 · 찾는 중」 은 「탐색」 / 「찾는 중」 두 줄로 꼬마 밑 가운데에
+const MINI_COL = 10
+const miniLines = (label: string): string[] => label.split(' · ')
+
 /** 사건(도구 시작 · 끝, 턴 시작 · 끝, 도우미, 훅 막음) 때 슬라임 상태를 다시 정한다 */
 async function refreshSlime($: Pick<CoreEngineInterface, 'state' | 'clock'>): Promise<void> {
   const v = slimeView(await read($, tasks), await read($, calls), await read($, subs), await $.clock.now())
@@ -1050,13 +1054,15 @@ export const register: Register = (on, options) => {
             </Box>
           </Box>
           {view.minis.length > 0 && (
-            <Box flexDirection="row" columnGap={2}>
+            <Box flexDirection="row" columnGap={1}>
               {view.minis.map((m, i) => (
-                <Box key={`helper-${i}`} flexDirection="column" flexShrink={1}>
+                <Box key={`helper-${i}`} flexDirection="column" width={MINI_COL} alignItems="center">
                   {art(miniFrame(m.state, frameNow), `mini-${i}`, 8, 4, m.label)}
-                  <Text color={SLIME_SPEC[m.state].accent} wrap="wrap">
-                    {m.label}
-                  </Text>
+                  {miniLines(m.label).map(l => (
+                    <Text color={SLIME_SPEC[m.state].accent} wrap="wrap">
+                      {l}
+                    </Text>
+                  ))}
                 </Box>
               ))}
               {view.more > 0 && <Text dimColor>{`+${view.more}`}</Text>}
@@ -1377,7 +1383,13 @@ export const register: Register = (on, options) => {
     used +=
       linesOf(turnText, cols) +
       // 슬라임 자리: 8줄(+ 아래 한 줄) — 꼬마가 있으면 오른쪽이 더 길어짐
-      (showSlime ? Math.max(0, 9 - linesOf(turnText, cols)) + (view.minis.length > 0 ? 6 : 0) : 0) +
+      (showSlime
+        ? Math.max(0, 9 - linesOf(turnText, cols)) +
+          // 꼬마 그림 4줄 + 가장 긴 이름표(종류 / 상태가 10칸에서 접힌 줄 수)
+          (view.minis.length > 0
+            ? 4 + Math.max(...view.minis.map(m => miniLines(m.label).reduce((n, l) => n + linesOf(l, MINI_COL), 0)))
+            : 0)
+        : 0) +
       bgRows +
       (hud !== '' || hostRow !== null ? 1 : 0) +
       (hud !== '' ? 1 : 0) +

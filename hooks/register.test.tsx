@@ -839,9 +839,12 @@ test('젤리 슬라임: 맨 위 16×8 격자 + 오른쪽 상태 글, 도우미 �
   expect([big?.props.columns, big?.props.rows]).toEqual([16, 8])
   const mini = await ui.find({ type: 'Raster', key: 'mini-0' })
   expect([mini?.props.columns, mini?.props.rows]).toEqual([8, 4])
-  expect((await ui.find({ type: 'Text', text: /탐색 · 찾는 중/ })) !== undefined).toBe(true)
-  // 도우미는 슬라임 아래 따로 한 줄 — 꼬마마다 자기 이름표를 바로 밑에(오른쪽 칸 아래 구석으로 밀리지 않게)
-  expect((await ui.find({ type: 'Box', key: 'helper-0' }))?.text).toBe('탐색 · 찾는 중')
+  // 도우미는 슬라임 아래 따로 한 줄 — 꼬마마다 10칸 칸에 가운데 맞춰 「종류」 / 「상태」 두 줄(글자가 꼬마보다 길게 안 늘어나게)
+  const helper = await ui.find({ type: 'Box', key: 'helper-0' })
+  expect([helper?.props.width, helper?.props.alignItems]).toEqual([10, 'center'])
+  expect((await ui.find({ type: 'Text', text: /^탐색$/ }))?.text).toBe('탐색')
+  expect((await ui.find({ type: 'Text', text: /^찾는 중$/ }))?.text).toBe('찾는 중')
+  expect(await ui.find({ type: 'Text', text: /탐색 · / })).toBe(undefined)
   // 슬라임 오른쪽 칸 = 「▶ 작업 중」 을 가진 가장 작은 묶음. 거기엔 이름표가 없다
   const right = (await ui.findAll({ type: 'Box', text: /^▶ 작업 중/ })).sort((a, b) => a.text.length - b.text.length)[0]
   expect(right?.text.includes('탐색')).toBe(false)
