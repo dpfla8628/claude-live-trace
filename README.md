@@ -9,7 +9,7 @@
 ![Claude Code mod](https://img.shields.io/badge/Claude_Code-mod-D97757)
 ![tests](https://img.shields.io/badge/tests-44_passing-3fb950)
 ![UI](https://img.shields.io/badge/UI-%ED%95%9C%EA%B5%AD%EC%96%B4-58a6ff)
-![version](https://img.shields.io/badge/version-0.8.3-8b949e)
+![version](https://img.shields.io/badge/version-0.8.4-8b949e)
 
 <img src="assets/panel.png" alt="live-trace 패널 실제 화면: 맨 위 젤리 슬라임과 「작업 중」, 진행 중 · 끝난 작업 상자, 노랑 카드의 진행 막대와 단계 칩, 흐름 타임라인" width="360">
 

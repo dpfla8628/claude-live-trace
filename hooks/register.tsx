@@ -1252,18 +1252,16 @@ export const register: Register = (on, options) => {
         2 + // 카드 테두리
         (showSlime ? 0 : linesOf(`지금 ${nowText}`, cardW)) + // 슬라임이 있으면 「지금」 은 슬라임 오른쪽
         3 +
-        asks.reduce((n, a) => n + linesOf(`추가 요청 ${a}`, cardW - 2), 0) + // 막대 ▎ + 여백 1칸
+        asks.reduce((n, a) => n + linesOf(`추가 요청 ${a}`, cardW), 0) +
+        (asks.length > 0 ? 1 : 0) + // 추가 요청 아래 가로줄
         outer.reduce((n, h) => n + linesOf(`⚑ 훅이 ${hookLabel(h)}`, cardW), 0)
       head = Card(
         'warning',
         <Box flexDirection="column">
           {!showSlime && Row('지금', nowText, { bold: true })}
-          {/* 사용자 말은 파란 막대(▎) 묶음 — 아래 ⚑ 알림 · 진행 줄과 갈려 보이게 */}
-          {asks.length > 0 && (
-            <Box flexDirection="column" borderStyle="quote" borderColor="suggestion" paddingLeft={1}>
-              {asks.map(a => Row('추가 요청', firstSentence(a)))}
-            </Box>
-          )}
+          {asks.map(a => Row('추가 요청', firstSentence(a)))}
+          {/* 추가 요청 아래 흐린 가로줄 — 아래 ⚑ 알림 · 진행 줄과 갈려 보이게 */}
+          {asks.length > 0 && <Text dimColor>{'─'.repeat(Math.max(10, cardW))}</Text>}
           {outer.map(h => HookRow(h, '훅이 '))}
           {/* 진행 막대는 [n/m] 단계 표시가 있을 때만 — 없으면 어림하지 않고 동작 수 · 걸린 시간 */}
           {step && pct !== undefined ? (
