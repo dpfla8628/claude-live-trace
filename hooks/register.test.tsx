@@ -585,6 +585,10 @@ test('작업 중에 친 요청은 지금 작업의 「추가 요청」으로 보
 
   const mid = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await mid.find({ type: 'Text', text: /^추가 요청/ }))?.text).toBe('추가 요청 그 다음엔 높이 값도 알려줘.')
+  // 사용자 말은 왼쪽 파란 막대(▎) 묶음 — 아래 ⚑ 알림 · 진행 줄과 갈려 보이게
+  const quoted = (await mid.findAll({ type: 'Box', text: /^추가 요청/ })).find(b => b.props.borderStyle === 'quote')
+  expect(quoted?.props.borderColor).toBe('suggestion')
+  expect(quoted?.text).toBe('추가 요청 그 다음엔 높이 값도 알려줘.')
   expect(await mid.find({ type: 'Text', text: /^작업 \d개/ })).toBe(undefined)
   expect(await mid.find({ text: /task-notification|다음 작업/ })).toBe(undefined)
   await mid.unmount()
